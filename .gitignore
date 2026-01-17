@@ -118,3 +118,5 @@ data/
 /tmp/
 *.db
 *.sqlite
+
+CLAUDE.md
