@@ -256,6 +256,9 @@ Browse working examples in [`examples/`](examples/):
 - **Clojure**: Semantic search, RAG, collection protocols
 - **Java**: Quick start, auditable index, metadata usage
 
+**Demo Projects:**
+- **[Einbetten](https://github.com/replikativ/einbetten)**: Wikipedia semantic search with Datahike + FastEmbed (2,000 articles, ~8,000 chunks)
+
 ---
 
 ## Requirements
