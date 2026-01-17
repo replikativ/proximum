@@ -6,7 +6,7 @@
 
 > ⚠️ **Early Beta**: Proximum is under active development. APIs may change before 1.0 release. Feedback welcome!
 
-> 📋 **Help shape Proximum!** We'd love to hear about your use case. Please fill out our [short feedback survey](https://docs.google.com/forms/d/e/1FAIpQLSeUQuw5SPyIx661e1pwZiX0100bP-DPpF2Zfpptg1h6k14OTA/viewform) (2 min).
+> 📋 **Help shape Proximum!** We'd love your input. Please fill out our [2-minute feedback survey](https://docs.google.com/forms/d/e/1FAIpQLSeUQuw5SPyIx661e1pwZiX0100bP-DPpF2Zfpptg1h6k14OTA/viewform).
 
 A high-performance, embeddable vector database for Clojure and Java with **Git-like versioning** and **zero-cost branching**.
 
