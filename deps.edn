@@ -1,0 +1,154 @@
+{:paths ["src" "src-java" "resources" "target/classes"]
+
+ ;; For Maven Central deployment, use published dependencies:
+ :deps {org.clojure/clojure {:mvn/version "1.12.0"}
+        org.replikativ/persistent-sorted-set {:mvn/version "0.3.117"}
+        ;; Use published Konserve version
+        org.replikativ/konserve {:mvn/version "0.9.342"}
+        org.replikativ/hasch {:mvn/version "0.3.96"}
+        com.clojure-goes-fast/clj-memory-meter {:mvn/version "0.3.0"}
+        org.clojure/core.cache {:mvn/version "1.1.234"}
+        ;; Malli for API specification and validation
+        metosin/malli {:mvn/version "0.16.4"}
+        ;; Logging: trove facade for Clojure, SLF4J for Java
+        com.taoensso/trove {:mvn/version "1.1.0"}
+        org.slf4j/slf4j-api {:mvn/version "2.0.16"}
+        ;; Default backend (users can exclude and use their own)
+        org.slf4j/slf4j-simple {:mvn/version "2.0.16"}}
+
+ :aliases
+ {:dev {:extra-paths ["dev" "test" "benchmark"]
+        :extra-deps {criterium/criterium {:mvn/version "0.4.6"}
+                     nrepl/nrepl {:mvn/version "1.3.0"}
+                     cider/cider-nrepl {:mvn/version "0.50.2"}
+                     com.clojure-goes-fast/clj-async-profiler {:mvn/version "1.6.2"}
+                     org.clojure/data.json {:mvn/version "2.5.1"}
+                     clj-python/libpython-clj {:mvn/version "2.026"}}
+        :jvm-opts ["-Djdk.attach.allowAttachSelf=true"
+                   "-XX:+UnlockDiagnosticVMOptions"
+                   "-XX:+DebugNonSafepoints"
+                   "-XX:+UseG1GC"
+                   "-Xmx4g"
+                   ;; Enable Vector API for SIMD
+                   "--add-modules=jdk.incubator.vector"
+                   ;; Enable foreign memory API for MemorySegment
+                   "--enable-native-access=ALL-UNNAMED"]}
+
+  :repl {:extra-paths ["dev" "test" "benchmark"]
+         :extra-deps {criterium/criterium {:mvn/version "0.4.6"}
+                      nrepl/nrepl {:mvn/version "1.3.0"}
+                      cider/cider-nrepl {:mvn/version "0.50.2"}
+                      com.clojure-goes-fast/clj-async-profiler {:mvn/version "1.6.2"}
+                      org.clojure/data.json {:mvn/version "2.5.1"}
+                      clj-python/libpython-clj {:mvn/version "2.026"}}
+         :jvm-opts ["-Djdk.attach.allowAttachSelf=true"
+                    "-XX:+UnlockDiagnosticVMOptions"
+                    "-XX:+DebugNonSafepoints"
+                    "-XX:+UseG1GC"
+                    "-Xmx4g"
+                    "--add-modules=jdk.incubator.vector"
+                    "--enable-native-access=ALL-UNNAMED"]
+         :main-opts ["-m" "nrepl.cmdline"
+                     "--middleware" "[cider.nrepl/cider-middleware]"]}
+
+  :test {:extra-paths ["test"]
+         :extra-deps {io.github.cognitect-labs/test-runner
+                      {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+         :jvm-opts ["--add-modules=jdk.incubator.vector"
+                    "--enable-native-access=ALL-UNNAMED"]
+         :main-opts ["-m" "cognitect.test-runner"]}
+
+  :benchmark {:extra-paths ["benchmark"]
+              :extra-deps {datalevin/datalevin {:mvn/version "0.9.27"}
+                           criterium/criterium {:mvn/version "0.4.6"}
+                           org.clojure/data.json {:mvn/version "2.5.1"}
+                           ;; Java vector DB baselines
+                           io.github.jbellis/jvector {:mvn/version "3.0.1"}
+                           org.apache.lucene/lucene-core {:mvn/version "10.3.2"}
+                           com.github.jelmerk/hnswlib-core {:mvn/version "1.2.1"}}
+              :jvm-opts ["--add-modules=jdk.incubator.vector"
+                         "--enable-native-access=ALL-UNNAMED"
+                         "-Xmx8g"]}
+
+  ;; Java framework integration tests
+  :java-integration
+  {:extra-paths ["test/java"]
+   :extra-deps {;; Spring AI
+                org.springframework.ai/spring-ai-core {:mvn/version "1.0.0-M5"}
+                ;; Spring Boot (for autoconfiguration)
+                org.springframework.boot/spring-boot-autoconfigure {:mvn/version "3.4.1"}
+                ;; LangChain4j
+                dev.langchain4j/langchain4j-core {:mvn/version "0.36.2"}
+                ;; Micrometer for Spring AI observability
+                io.micrometer/micrometer-observation {:mvn/version "1.14.2"}}
+   :jvm-opts ["--add-modules=jdk.incubator.vector"
+              "--enable-native-access=ALL-UNNAMED"]}
+
+  ;; Build and deploy
+  :build
+  {:deps {io.github.clojure/tools.build {:mvn/version "0.10.6"}
+          slipset/deps-deploy {:mvn/version "0.2.2"}}
+   :jvm-opts ["--add-modules=jdk.incubator.vector"
+              "--enable-native-access=ALL-UNNAMED"]
+   :ns-default build}
+
+  ;; Build Spring AI adapter
+  :build-spring-ai
+  {:extra-paths ["src-java-optional"]
+   :extra-deps {io.github.clojure/tools.build {:mvn/version "0.10.6"}
+                slipset/deps-deploy {:mvn/version "0.2.2"}
+                org.springframework.ai/spring-ai-core {:mvn/version "1.0.0-M5"}
+                org.springframework.boot/spring-boot-autoconfigure {:mvn/version "3.4.1"}
+                io.micrometer/micrometer-observation {:mvn/version "1.14.2"}}
+   :jvm-opts ["--add-modules=jdk.incubator.vector"
+              "--enable-native-access=ALL-UNNAMED"]
+   :ns-default build}
+
+  ;; Build LangChain4j adapter
+  :build-langchain4j
+  {:extra-paths ["src-java-optional"]
+   :extra-deps {io.github.clojure/tools.build {:mvn/version "0.10.6"}
+                slipset/deps-deploy {:mvn/version "0.2.2"}
+                dev.langchain4j/langchain4j-core {:mvn/version "0.36.2"}}
+   :jvm-opts ["--add-modules=jdk.incubator.vector"
+              "--enable-native-access=ALL-UNNAMED"]
+   :ns-default build}
+
+  ;; Commercial/Enterprise extensions (separate licensing)
+  :enterprise
+  {:extra-paths ["src-commercial" "test-commercial"]
+   :jvm-opts ["--add-modules=jdk.incubator.vector"
+              "--enable-native-access=ALL-UNNAMED"]}
+
+  ;; Run all tests including enterprise
+  :test-all
+  {:extra-paths ["test" "src-commercial" "test-commercial"]
+   :extra-deps {io.github.cognitect-labs/test-runner
+                {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+   :jvm-opts ["--add-modules=jdk.incubator.vector"
+              "--enable-native-access=ALL-UNNAMED"]
+   :main-opts ["-m" "cognitect.test-runner" "-d" "test" "-d" "test-commercial"]}
+
+  ;; Run Java binding tests with JUnit 5
+  :java-test
+  {:extra-paths ["test/java" "target/test-classes"]
+   :extra-deps {org.junit.jupiter/junit-jupiter {:mvn/version "5.11.4"}
+                org.junit.platform/junit-platform-console-standalone {:mvn/version "1.11.4"}}
+   :jvm-opts ["--add-modules=jdk.incubator.vector"
+              "--enable-native-access=ALL-UNNAMED"]}
+
+  ;; Code formatting check
+  :format {:extra-deps {cljfmt/cljfmt {:mvn/version "0.9.2"}}
+           :main-opts ["-m" "cljfmt.main" "check" "src" "test"]}
+
+  ;; Code formatting fix
+  :ffix {:extra-deps {cljfmt/cljfmt {:mvn/version "0.9.2"}}
+         :main-opts ["-m" "cljfmt.main" "fix" "src" "test"]}
+
+  ;; Linting with clj-kondo
+  :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
+         :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"]}
+
+  ;; Check for outdated dependencies
+  :outdated {:extra-deps {com.github.liquidz/antq {:mvn/version "2.10.1241"}}
+             :main-opts ["-m" "antq.core"]}}}

@@ -1,0 +1,120 @@
+# ============================================================================
+# PRIVATE CONTENT - NEVER COMMIT TO PUBLIC GITHUB
+# ============================================================================
+
+# Private business content and internal documentation
+.internal/
+benchmark/
+*.private
+*-internal.*
+.sync-config
+
+# Commercial/Enterprise extensions (add when ready for public release)
+src-commercial/
+test-commercial/
+
+# Sensitive files
+.env
+.secrets
+*.key
+*.pem
+credentials.json
+*credentials*
+
+# ============================================================================
+# BUILD ARTIFACTS
+# ============================================================================
+
+# Clojure
+target/
+.cpcache/
+.nrepl-port
+.rebel_readline_history
+.lein-*
+
+# Java
+*.class
+*.jar
+!deps.edn
+hs_err_pid*
+replay_pid*
+
+# clj-kondo
+.clj-kondo/.cache/
+
+# LSP
+.lsp/
+.calva/
+
+# ============================================================================
+# IDE & OS
+# ============================================================================
+
+# IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Emacs
+*~
+\#*\#
+.\#*
+.projectile
+
+# Vim
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+.directory
+.Trash-*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ============================================================================
+# TEMPORARY & DEVELOPMENT
+# ============================================================================
+
+# Logs
+*.log
+logs/
+
+# Test output
+test-output/
+.test-results/
+
+# Benchmarks
+benchmark/results/
+benchmark/data/
+
+# Shadow CLJS
+.shadow-cljs/
+node_modules/
+
+# Python (for benchmark scripts)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+benchmark-env/
+
+# Data directories (from examples/tests)
+data/
+/tmp/
+*.db
+*.sqlite

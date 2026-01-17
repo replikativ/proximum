@@ -1,0 +1,30 @@
+spring:
+  application:
+    name: spring-boot-rag
+
+  ai:
+    openai:
+      api-key: ${OPENAI_API_KEY}
+      base-url: ${OPENAI_BASE_URL:https://api.openai.com}
+      chat:
+        model: ${OPENAI_MODEL:gpt-4o-mini}
+      embedding:
+        model: ${OPENAI_EMBEDDING_MODEL:nomic-ai/nomic-embed-text-v1.5}
+        dimensions: ${OPENAI_EMBEDDING_DIMENSIONS:768}
+
+server:
+  port: 8080
+
+proximum:
+  storage-path: ${java.io.tmpdir}/proximum-rag
+  dimensions: 768  # Must match embedding model
+  distance: COSINE  # Best for normalized OpenAI embeddings
+  m: 16
+  ef-construction: 200
+  capacity: 100000
+  crypto-hash: true  # Enable auditability
+
+logging:
+  level:
+    com.example.rag: INFO
+    org.replikativ.proximum: DEBUG

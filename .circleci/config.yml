@@ -1,0 +1,249 @@
+version: 2.1
+
+commands:
+  install-clojure:
+    description: "Install Clojure CLI tools"
+    steps:
+      - run:
+          name: Install Clojure CLI 1.12.0.1517
+          command: |
+            if ! command -v clojure &> /dev/null; then
+              curl -L -O https://download.clojure.org/install/linux-install-1.12.0.1517.sh
+              chmod +x linux-install-1.12.0.1517.sh
+              sudo ./linux-install-1.12.0.1517.sh
+              rm linux-install-1.12.0.1517.sh
+            fi
+
+# NOTE: We use a custom config instead of replikativ/clj-tools orb because:
+# 1. Java 22+ required (Foreign Memory API finalized in Java 22, Vector API incubating)
+# 2. Multiple artifact deployments (core, Spring AI, LangChain4j)
+# 3. Custom test suites (Java API, adapter compliance)
+
+executors:
+  clojure-java22:
+    docker:
+      # Java 22+ required: Foreign Memory API finalized in Java 22
+      # Using base openjdk image - Clojure CLI installed in setup job
+      - image: cimg/openjdk:22.0
+    working_directory: ~/repo
+    resource_class: large
+    environment:
+      # JVM options are passed via deps.edn :jvm-opts in aliases (:test, :dev, etc.)
+      # and explicitly in build.clj for javac compilation.
+      # Don't use JAVA_TOOL_OPTIONS globally as it affects all Java processes.
+      JVM_OPTS: "-Xmx3200m"
+
+jobs:
+  setup:
+    executor: clojure-java22
+    steps:
+      - checkout
+      - install-clojure
+      - restore_cache:
+          keys:
+            - v2-dependencies-{{ checksum "deps.edn" }}
+            - v2-dependencies-
+      - run:
+          name: Download dependencies
+          command: clojure -P -M:dev:test:build
+      - save_cache:
+          paths:
+            - ~/.m2
+            - ~/.gitlibs
+          key: v2-dependencies-{{ checksum "deps.edn" }}
+      - persist_to_workspace:
+          root: ~/
+          paths:
+            - repo
+
+  build:
+    executor: clojure-java22
+    steps:
+      - attach_workspace:
+          at: ~/
+      - install-clojure
+      - run:
+          name: Build JAR (includes Java codegen)
+          command: clojure -T:build jar
+      - persist_to_workspace:
+          root: ~/
+          paths:
+            - repo/target
+            - repo/src-java
+
+  format:
+    executor: clojure-java22
+    steps:
+      - attach_workspace:
+          at: ~/
+      - install-clojure
+      - run:
+          name: Check code formatting
+          command: clojure -M:format
+
+  test-clojure:
+    executor: clojure-java22
+    steps:
+      - attach_workspace:
+          at: ~/
+      - install-clojure
+      - run:
+          name: Run Clojure tests
+          command: clojure -M:test
+      - store_test_results:
+          path: target/test-results
+
+  test-java-api:
+    executor: clojure-java22
+    steps:
+      - attach_workspace:
+          at: ~/
+      - install-clojure
+      - run:
+          name: Run Java API tests
+          command: clojure -T:build run-java-api-tests
+      - store_test_results:
+          path: target/test-results
+
+  test-adapters:
+    executor: clojure-java22
+    steps:
+      - attach_workspace:
+          at: ~/
+      - install-clojure
+      - run:
+          name: Run adapter compliance tests
+          command: clojure -T:build run-adapter-compliance-tests
+
+  deploy:
+    executor: clojure-java22
+    steps:
+      - attach_workspace:
+          at: ~/
+      - install-clojure
+      - run:
+          name: Deploy core library to Clojars
+          command: |
+            if [ "${CIRCLE_BRANCH}" = "main" ]; then
+              clojure -T:build deploy
+            else
+              echo "Skipping deploy - not on main branch"
+            fi
+
+  deploy-spring-ai:
+    executor: clojure-java22
+    steps:
+      - attach_workspace:
+          at: ~/
+      - install-clojure
+      - run:
+          name: Deploy Spring AI adapter to Clojars
+          command: |
+            if [ "${CIRCLE_BRANCH}" = "main" ]; then
+              clojure -T:build-spring-ai deploy-spring-ai
+            else
+              echo "Skipping deploy - not on main branch"
+            fi
+
+  deploy-langchain4j:
+    executor: clojure-java22
+    steps:
+      - attach_workspace:
+          at: ~/
+      - install-clojure
+      - run:
+          name: Deploy LangChain4j adapter to Clojars
+          command: |
+            if [ "${CIRCLE_BRANCH}" = "main" ]; then
+              clojure -T:build-langchain4j deploy-langchain4j
+            else
+              echo "Skipping deploy - not on main branch"
+            fi
+
+  release:
+    executor: clojure-java22
+    steps:
+      - attach_workspace:
+          at: ~/
+      - run:
+          name: Install GitHub CLI
+          command: |
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            sudo apt update
+            sudo apt install gh -y
+      - run:
+          name: Create GitHub release
+          command: |
+            if [ "${CIRCLE_BRANCH}" = "main" ] && [ -n "${GITHUB_TOKEN}" ]; then
+              # Extract version from JAR filename
+              JAR_FILE=$(ls target/proximum-*.jar | head -1)
+              VERSION=$(basename "$JAR_FILE" | sed 's/proximum-//' | sed 's/.jar//')
+
+              echo "Creating release for version ${VERSION}"
+              gh release create "v${VERSION}" \
+                --title "Release ${VERSION}" \
+                --notes "Automated release from CircleCI" \
+                target/*.jar || echo "Release may already exist"
+            else
+              echo "Skipping release - not on main branch or no GITHUB_TOKEN"
+            fi
+
+workflows:
+  version: 2
+  build-test-and-deploy:
+    jobs:
+      - setup
+      - build:
+          requires:
+            - setup
+      - format:
+          requires:
+            - setup
+      - test-clojure:
+          requires:
+            - build
+            - format
+      - test-java-api:
+          requires:
+            - build
+            - format
+      - test-adapters:
+          requires:
+            - build
+            - format
+      - deploy:
+          context:
+            - clojars-deploy
+          filters:
+            branches:
+              only: main
+          requires:
+            - test-clojure
+            - test-java-api
+            - test-adapters
+      - deploy-spring-ai:
+          context:
+            - clojars-deploy
+          filters:
+            branches:
+              only: main
+          requires:
+            - deploy
+      - deploy-langchain4j:
+          context:
+            - clojars-deploy
+          filters:
+            branches:
+              only: main
+          requires:
+            - deploy
+      - release:
+          context:
+            - github-token
+          filters:
+            branches:
+              only: main
+          requires:
+            - deploy-spring-ai
+            - deploy-langchain4j
