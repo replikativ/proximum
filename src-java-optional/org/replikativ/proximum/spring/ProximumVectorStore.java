@@ -239,6 +239,15 @@ public class ProximumVectorStore implements VectorStore {
     }
 
     /**
+     * Sync all data to durable storage with a commit message.
+     *
+     * @param message the commit message
+     */
+    public void sync(String message) {
+        store = store.sync(message);
+    }
+
+    /**
      * Get the underlying store for advanced operations.
      *
      * @return the core ProximumVectorStore

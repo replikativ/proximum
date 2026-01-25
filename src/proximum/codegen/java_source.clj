@@ -172,6 +172,7 @@
                                 (= type-kw :ExternalId) "id"
                                 (= type-kw :int) "k"
                                 (= type-kw :pos-int?) "k"
+                                (= type-kw :map) "opts"
                                 :else (str "arg" i))))
                           effective-params)
               ;; Count occurrences for uniquification
@@ -257,6 +258,7 @@
          (or (= param-name "target")
              (= param-name "config")
              (= param-name "options")
+             (= param-name "opts")
              (= param-name "storeConfig")
              (= param-name "metadata")))
     (str "toClojureMap(" param-name ")")
@@ -271,10 +273,12 @@
 
 (defn- generate-method-body
   "Generate method body that delegates to Clojure function."
-  [{:keys [method-name static? return-type params op-key]}]
+  [{:keys [method-name static? return-type params op-key include-optional?]}]
   (let [java-var-name (op-key->java-var op-key)
-        ;; Only use required (non-optional) params - matches the signature
-        required-params (remove :optional? params)
+        ;; Use all params when include-optional? is set, otherwise only required
+        required-params (if include-optional?
+                          params
+                          (remove :optional? params))
         ;; Convert parameters that need type conversion
         param-exprs (map (fn [{:keys [name type]}]
                            (param-conversion name type))
@@ -671,13 +675,33 @@
                 (str "            " (op-key->java-var op-key) "Fn = Clojure.var(\"proximum.core\", \""
                      (name op-key) "\");")))))
 
+(defn- generate-optional-overload
+  "Generate an overloaded method that includes optional params."
+  [{:keys [method-name return-type params doc] :as method-info}]
+  (let [all-param-str (str/join ", "
+                                (map #(str (:type %) " " (:name %)) params))
+        needs-sync? (= return-type "ProximumVectorStore")
+        modifier (if needs-sync? "public synchronized " "public ")
+        overload-info (assoc method-info
+                             :param-str all-param-str
+                             :include-optional? true)]
+    (str (when doc (str (format-javadoc doc) "\n"))
+         "    " modifier return-type " " method-name "(" all-param-str ") {\n"
+         "        ensureInitialized();\n"
+         (generate-method-body overload-info)
+         "    }\n")))
+
 (defn- generate-all-methods
   "Generate all API methods from specification."
   []
   (let [ops (java/java-operations)
         method-infos (map (fn [[k v]] (generate-method-signature k v)) ops)
         static-methods (filter :static? method-infos)
-        instance-methods (remove :static? method-infos)]
+        instance-methods (remove :static? method-infos)
+        ;; Generate overloaded methods for operations with optional params
+        overloaded-methods (filter (fn [{:keys [params]}]
+                                     (some :optional? params))
+                                   instance-methods)]
     (str "    // ==========================================================================\n"
          "    // Static Methods (from specification)\n"
          "    // ==========================================================================\n\n"
@@ -686,7 +710,13 @@
          "    // ==========================================================================\n"
          "    // Instance Methods (from specification)\n"
          "    // ==========================================================================\n\n"
-         (str/join "\n" (map generate-instance-method instance-methods)))))
+         (str/join "\n" (map generate-instance-method instance-methods))
+         (when (seq overloaded-methods)
+           (str "\n"
+                "    // ==========================================================================\n"
+                "    // Overloaded Methods (with optional parameters)\n"
+                "    // ==========================================================================\n\n"
+                (str/join "\n" (map generate-optional-overload overloaded-methods)))))))
 
 (defn generate-java-class
   "Generate the complete ProximumVectorStore.java source code."
@@ -1026,6 +1056,19 @@ public class ProximumVectorStore implements AutoCloseable {
     // ==========================================================================
     // Mutable Convenience Methods
     // ==========================================================================
+
+    /**
+     * Persist current state to durable storage with a commit message.
+     *
+     * @param message the commit message
+     * @return this store instance
+     */
+    public synchronized ProximumVectorStore sync(String message) {
+        ensureInitialized();
+        Object newIdx = syncFn.invoke(clojureIndex, toClojureMap(java.util.Map.of(\"message\", message)));
+        this.clojureIndex = newIdx;
+        return this;
+    }
 
     /**
      * Add a vector with auto-generated ID and return the ID (mutable convenience method).

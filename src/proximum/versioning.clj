@@ -341,12 +341,16 @@
    No compaction performed; use `compact` separately if needed.
 
    Args:
-     idx           - Target index
+     idx           - Target index (must have been synced at least once)
      source-branch - Branch keyword to merge from
      opts          - Options map:
-                     :ids - Coll of external-ids to copy from source
-                            Use :all to copy all vectors
+                     :ids     - Coll of external-ids to copy from source
+                                Use :all to copy all vectors
                      :parents - Optional explicit parent set (advanced)
+                     :message - Optional commit message string
+
+   Vectors already present on the target (by external-id) are skipped.
+   Creates a merge commit with both branches as parents.
 
    Examples:
      ;; Merge all vectors from feature branch
@@ -360,8 +364,8 @@
                            :parents #{commit-a commit-b commit-c}})
 
    Returns:
-     New index with merged vectors and merge commit"
-  [idx source-branch {:keys [ids parents]}]
+     New synced index with merged vectors and merge commit"
+  [idx source-branch {:keys [ids parents message]}]
   (when-not ids
     (throw (ex-info "merge! requires :ids option" {:hint "Use :all or a collection of external-ids"})))
   (let [edge-store (p/raw-storage idx)
@@ -374,27 +378,32 @@
                                     {:mmap-dir (p/mmap-dir idx)})
         ;; Determine which IDs to copy
         ids-to-copy (if (= ids :all)
-                      ;; Get all external-ids from source
-                      (map :external-id (seq (p/external-id-index source-idx)))
+                      (keep :external-id (seq (p/external-id-index source-idx)))
                       ids)
-        ;; Copy vectors from source to target
+        ;; Copy vectors from source to target, skipping duplicates
         merged-idx (reduce (fn [acc ext-id]
-                             (if-let [internal-id (when-let [entry (first (filter #(= (:external-id %) ext-id)
-                                                                                  (seq (p/external-id-index source-idx))))]
-                                                    (:node-id entry))]
-                               (let [vec (p/get-vector source-idx internal-id)
-                                     meta (p/get-metadata source-idx internal-id)]
-                                 (if vec
-                                   (p/insert acc vec (assoc meta :external-id ext-id))
-                                   acc))
-                               acc))
+                             ;; Skip if already exists in target
+                             (if (when-let [entry (first (filter #(= (:external-id %) ext-id)
+                                                                 (seq (p/external-id-index acc))))]
+                                   (:node-id entry))
+                               acc
+                               (if-let [internal-id (when-let [entry (first (filter #(= (:external-id %) ext-id)
+                                                                                    (seq (p/external-id-index source-idx))))]
+                                                      (:node-id entry))]
+                                 (let [vec (p/get-vector source-idx internal-id)
+                                       meta (p/get-metadata source-idx internal-id)]
+                                   (if vec
+                                     (p/insert acc vec (assoc meta :external-id ext-id))
+                                     acc))
+                                 acc)))
                            idx
                            ids-to-copy)
         ;; Determine parents for merge commit
         merge-parents (or parents
                           #{(p/current-commit idx)
-                            (:commit-id source-snapshot)})]
-    ;; Note: The caller should call sync! to create the merge commit
-    ;; We return the merged index with updated state
-    ;; The next sync! will record merge-parents
-    (assoc merged-idx :merge-parents merge-parents)))
+                            (:commit-id source-snapshot)})
+        ;; Sync with merge parents to create the merge commit
+        synced-idx (p/sync! merged-idx {:parents merge-parents
+                                        :message message})]
+    (p/close! source-idx)
+    synced-idx))

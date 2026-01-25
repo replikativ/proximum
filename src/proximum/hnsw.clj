@@ -890,7 +890,9 @@
       (update-hnsw-index idx {:address-map new-address-map
                               :commit-id (:commit-id (.-state idx))})))
 
-  (sync! [idx]
+  (sync!
+    ([idx] (p/sync! idx {}))
+    ([idx opts]
     ;; Sync the index to durable storage, creating a commit
     ;; See writing.clj for helper functions
     (let [state (.-state idx)
@@ -992,17 +994,19 @@
                   commit-id (writing/generate-commit-id crypto-hash? new-commit-hash)
                   now (java.util.Date.)
 
-                  ;; Determine parents - use prev-snapshot read at top of sync!
+                  ;; Determine parents - use opts override or prev-snapshot
                   prev-commit (:commit-id prev-snapshot)
-                  parents (writing/determine-parents prev-commit)
+                  parents (or (:parents opts)
+                              (writing/determine-parents prev-commit))
 
                   ;; Build the index snapshot with all PSS roots
                   ;; Use index with updated address-map for snapshot building
                   index-for-snapshot (update-hnsw-index idx {:address-map new-address-map})
-                  snapshot (writing/build-index-snapshot index-for-snapshot commit-id parents
-                                                         metadata-pss-root external-id-pss-root
-                                                         vectors-addr-pss-root edges-addr-pss-root
-                                                         now)]
+                  snapshot (cond-> (writing/build-index-snapshot index-for-snapshot commit-id parents
+                                                                metadata-pss-root external-id-pss-root
+                                                                vectors-addr-pss-root edges-addr-pss-root
+                                                                now)
+                             (:message opts) (assoc :message (:message opts)))]
 
               ;; Write commit entry and branch head using helper
               (writing/write-commit! edge-store commit-id branch snapshot)
@@ -1012,7 +1016,7 @@
                                       :commit-id commit-id}))
 
             ;; No storage - just return index with updated address-map
-            (update-hnsw-index idx {:address-map new-address-map}))))))  ; Close: if-let, middle-let, inner-let, outer-let, sync!
+            (update-hnsw-index idx {:address-map new-address-map})))))))  ; Close: if-let, inner-let, middle-let, outer-let, arity-form, sync!
 
   (close! [idx]
     (vectors/close! (.-vectors idx))

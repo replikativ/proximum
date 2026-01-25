@@ -80,8 +80,12 @@
   (fork [idx]
     "Create a copy-on-write fork with shared structure. O(1) operation.")
 
-  (sync! [idx]
-    "Persist to durable storage, creating a commit. Returns updated index.")
+  (sync! [idx] [idx opts]
+    "Persist to durable storage, creating a commit. Returns updated index.
+
+     Options (second arity):
+       :parents - explicit parent set (for merge commits with multiple parents)
+       :message - commit message string")
 
   (flush! [idx]
     "Force pending writes to storage without creating a commit.")

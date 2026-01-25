@@ -10,6 +10,8 @@
         org.clojure/core.cache {:mvn/version "1.1.234"}
         ;; Malli for API specification and validation
         metosin/malli {:mvn/version "0.16.4"}
+        ;; Yggdrasil COW memory model protocols
+        io.github.replikativ/yggdrasil {:local/root "../yggdrasil"}
         ;; Logging: trove facade for Clojure, SLF4J for Java
         com.taoensso/trove {:mvn/version "1.1.0"}
         org.slf4j/slf4j-api {:mvn/version "2.0.16"}

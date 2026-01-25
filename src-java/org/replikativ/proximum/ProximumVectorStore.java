@@ -898,6 +898,153 @@ public class ProximumVectorStore implements AutoCloseable {
         return this;
     }
 
+    // ==========================================================================
+    // Overloaded Methods (with optional parameters)
+    // ==========================================================================
+
+    /**
+     * Persist current state to durable storage, creating a commit.
+     * Waits for all pending writes to complete.
+     * 
+     * With {:sync? true}, blocks until complete.
+     * Default returns channel that delivers index when done.
+     */
+    public synchronized ProximumVectorStore sync(Map<String, Object> opts) {
+        ensureInitialized();
+        Object newIdx = syncFn.invoke(clojureIndex, toClojureMap(opts));
+        this.clojureIndex = newIdx;
+        return this;
+    }
+
+    /**
+     * Get comprehensive index health metrics.
+     * Returns: {:vector-count :deleted-count :live-count :deletion-ratio
+     *           :needs-compaction? :capacity :utilization :edge-count
+     *           :avg-edges-per-node :branch :commit-id :cache-hits :cache-misses}
+     */
+    public Map<String, Object> getMetrics(Map<String, Object> opts) {
+        ensureInitialized();
+        @SuppressWarnings("unchecked")
+        Map<Object, Object> result = (Map<Object, Object>) indexMetricsFn.invoke(clojureIndex, toClojureMap(opts));
+        return result == null ? null : convertClojureMap(result);
+    }
+
+    /**
+     * Search and include metadata in results.
+     * Returns seq of {:id :distance :metadata}.
+     * 
+     * Example:
+     *   (search-with-metadata idx query 10)
+     */
+    public List<SearchResult> searchWithMetadata(float[] vector, int k, SearchOptions options) {
+        ensureInitialized();
+        @SuppressWarnings("unchecked")
+        Iterable<Object> results = (Iterable<Object>) searchWithMetadataFn.invoke(clojureIndex, vector, k, options);
+        return toSearchResults(results);
+    }
+
+    /**
+     * Garbage collect unreachable data from storage.
+     * Removes commits older than remove-before date.
+     */
+    public Set<Object> gc(Object arg0, Map<String, Object> opts) {
+        ensureInitialized();
+        return (Set<Object>) gcFn.invoke(clojureIndex, convertFilterArg(arg0), toClojureMap(opts));
+    }
+
+    /**
+     * Search with filtering predicate or ID set.
+     * Filter can be:
+     *   - (fn [id metadata] boolean) - predicate receives external ID
+     *   - Set of allowed external IDs
+     * 
+     * Example:
+     *   (search-filtered idx query 10 #{"doc-1" "doc-2"})
+     */
+    public List<SearchResult> searchFiltered(float[] vector, int k, Object arg2, SearchOptions options) {
+        ensureInitialized();
+        @SuppressWarnings("unchecked")
+        Iterable<Object> results = (Iterable<Object>) searchFilteredFn.invoke(clojureIndex, vector, k, convertFilterArg(arg2), options);
+        return toSearchResults(results);
+    }
+
+    /**
+     * Insert a vector with an ID and optional metadata. Returns new index.
+     * ID can be any value (Long, String, UUID, etc.). Pass nil to auto-generate UUID.
+     * This is a pure operation - no I/O until sync! is called.
+     * 
+     * Example:
+     *   (insert idx (float-array [1.0 2.0 3.0]) 123)
+     *   (insert idx (float-array [1.0 2.0 3.0]) "doc-abc" {:category :science})
+     *   (insert idx vec nil)  ; auto-generates UUID
+     */
+    public synchronized ProximumVectorStore add(float[] vector, Object id, Map<String, Object> metadata) {
+        ensureInitialized();
+        Object newIdx = insertFn.invoke(clojureIndex, vector, id, toClojureMap(metadata));
+        this.clojureIndex = newIdx;
+        return this;
+    }
+
+    /**
+     * Check if index needs compaction (deletion ratio > threshold).
+     */
+    public boolean isNeedsCompaction(double arg0) {
+        ensureInitialized();
+        return (boolean) needsCompactionFn.invoke(clojureIndex, arg0);
+    }
+
+    /**
+     * Create compacted copy with only live vectors.
+     * Target: {:store-config {...} :mmap-dir "..."}
+     * Options: {:parallelism n}
+     */
+    public synchronized ProximumVectorStore compact(Map<String, Object> target, Map<String, Object> opts) {
+        ensureInitialized();
+        Object newIdx = compactFn.invoke(clojureIndex, toClojureMap(target), toClojureMap(opts));
+        this.clojureIndex = newIdx;
+        return this;
+    }
+
+    /**
+     * Search for k nearest neighbors.
+     * Returns sequence of {:id :distance} sorted by distance (ascending).
+     * IDs are external IDs as provided during insert.
+     * 
+     * Example:
+     *   (search idx query-vec 10 {:ef 100})
+     */
+    public List<SearchResult> search(float[] vector, int k, SearchOptions options) {
+        ensureInitialized();
+        @SuppressWarnings("unchecked")
+        Iterable<Object> results = (Iterable<Object>) searchFn.invoke(clojureIndex, vector, k, options);
+        return toSearchResults(results);
+    }
+
+    /**
+     * Start background compaction with zero downtime.
+     * Returns CompactionState wrapper for use during compaction.
+     */
+    public Object startOnlineCompaction(Map<String, Object> target, Map<String, Object> opts) {
+        ensureInitialized();
+        return (Object) startOnlineCompactionFn.invoke(clojureIndex, toClojureMap(target), toClojureMap(opts));
+    }
+
+    /**
+     * Insert multiple vectors with IDs efficiently.
+     * IDs list must match vectors list length. Use nil for auto-generated UUIDs.
+     * Options: {:metadata [m1 m2 ...], :parallelism n}
+     * 
+     * Example:
+     *   (insert-batch idx [vec1 vec2] [id1 id2])
+     *   (insert-batch idx [vec1 vec2] [nil nil] {:metadata [m1 m2]})
+     */
+    public synchronized ProximumVectorStore addBatch(List<float[]> arg0, List<Object> arg1, Map<String, Object> opts) {
+        ensureInitialized();
+        Object newIdx = insertBatchFn.invoke(clojureIndex, arg0, arg1, toClojureMap(opts));
+        this.clojureIndex = newIdx;
+        return this;
+    }
+
 
     // ==========================================================================
     // External ID API (public interface - hides internal IDs)
@@ -1137,6 +1284,19 @@ public class ProximumVectorStore implements AutoCloseable {
     // ==========================================================================
     // Mutable Convenience Methods
     // ==========================================================================
+
+    /**
+     * Persist current state to durable storage with a commit message.
+     *
+     * @param message the commit message
+     * @return this store instance
+     */
+    public synchronized ProximumVectorStore sync(String message) {
+        ensureInitialized();
+        Object newIdx = syncFn.invoke(clojureIndex, toClojureMap(java.util.Map.of("message", message)));
+        this.clojureIndex = newIdx;
+        return this;
+    }
 
     /**
      * Add a vector with auto-generated ID and return the ID (mutable convenience method).
