@@ -600,10 +600,10 @@
     ([state] (p/sync! state {}))
     ([state opts]
     ;; Sync delegates to source during compaction
-    (let [synced-source (p/sync! (.-source-idx state) opts)]
-      (CompactionState. synced-source (.-batch-state state) (.-delta-log state)
-                        (.-copy-future state) (.-finished? state) (.-error-atom state)
-                        (.-config state) (.-_meta state)))))
+     (let [synced-source (p/sync! (.-source-idx state) opts)]
+       (CompactionState. synced-source (.-batch-state state) (.-delta-log state)
+                         (.-copy-future state) (.-finished? state) (.-error-atom state)
+                         (.-config state) (.-_meta state)))))
 
   (flush! [state]
     ;; Properly thread the source-idx through

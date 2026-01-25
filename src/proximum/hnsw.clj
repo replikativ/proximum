@@ -895,128 +895,128 @@
     ([idx opts]
     ;; Sync the index to durable storage, creating a commit
     ;; See writing.clj for helper functions
-    (let [state (.-state idx)
-          vs (.-vectors idx)
-          edge-store (:edge-store state)
-          pes (.-pes-edges idx)
-          branch (:branch state)
-          crypto-hash? (:crypto-hash? state)
+     (let [state (.-state idx)
+           vs (.-vectors idx)
+           edge-store (:edge-store state)
+           pes (.-pes-edges idx)
+           branch (:branch state)
+           crypto-hash? (:crypto-hash? state)
           ;; Read previous commit from storage (branch head), not in-memory state
           ;; This is correct even after mutations have invalidated the in-memory commit-id
-          prev-snapshot (when edge-store (k/get edge-store branch nil {:sync? true}))
-          parent-commit-hash (when crypto-hash? (:commit-id prev-snapshot))]
+           prev-snapshot (when edge-store (k/get edge-store branch nil {:sync? true}))
+           parent-commit-hash (when crypto-hash? (:commit-id prev-snapshot))]
 
       ;; 1. Fire async flush for vectors
-      (vectors/flush-write-buffer-async! vs)
+       (vectors/flush-write-buffer-async! vs)
 
       ;; 2. Fire async flush for edges (COW: generates new storage addresses)
-      (let [edges-async-result
-            (when edge-store
-              (edges/flush-dirty-chunks-async! edge-store pes (:address-map state)
-                                               {:crypto-hash? crypto-hash?}))
+       (let [edges-async-result
+             (when edge-store
+               (edges/flush-dirty-chunks-async! edge-store pes (:address-map state)
+                                                {:crypto-hash? crypto-hash?}))
 
             ;; Track new address-map from edge flush
-            new-address-map (if edges-async-result
-                              (do
-                                (swap! (:pending-edge-writes state) into (:channels edges-async-result))
-                                (:address-map edges-async-result))
-                              (:address-map state))]
+             new-address-map (if edges-async-result
+                               (do
+                                 (swap! (:pending-edge-writes state) into (:channels edges-async-result))
+                                 (:address-map edges-async-result))
+                               (:address-map state))]
 
         ;; 3. Force mmap to disk and update header count
-        (when-let [mmap-buf (:mmap-buf vs)]
-          (.force ^java.nio.MappedByteBuffer mmap-buf)
-          (vectors/update-header-count! mmap-buf (vectors/count-vectors vs))
-          (.force ^java.nio.MappedByteBuffer mmap-buf))
+         (when-let [mmap-buf (:mmap-buf vs)]
+           (.force ^java.nio.MappedByteBuffer mmap-buf)
+           (vectors/update-header-count! mmap-buf (vectors/count-vectors vs))
+           (.force ^java.nio.MappedByteBuffer mmap-buf))
 
         ;; 4. Wait for all pending vector writes (atomic removal pattern)
         ;; Capture channels first, wait, then remove only what we waited on.
-        (let [vec-channels-to-wait @(:pending-writes vs)]
-          (doseq [ch vec-channels-to-wait]
-            (a/<!! ch))
-          (swap! (:pending-writes vs) #(reduce disj % vec-channels-to-wait)))
+         (let [vec-channels-to-wait @(:pending-writes vs)]
+           (doseq [ch vec-channels-to-wait]
+             (a/<!! ch))
+           (swap! (:pending-writes vs) #(reduce disj % vec-channels-to-wait)))
 
         ;; 5. Wait for all pending edge writes (atomic removal pattern)
-        (when-let [pending (:pending-edge-writes state)]
-          (let [edge-channels-to-wait @pending]
-            (doseq [ch edge-channels-to-wait]
-              (a/<!! ch))
-            (swap! pending #(reduce disj % edge-channels-to-wait))))
+         (when-let [pending (:pending-edge-writes state)]
+           (let [edge-channels-to-wait @pending]
+             (doseq [ch edge-channels-to-wait]
+               (a/<!! ch))
+             (swap! pending #(reduce disj % edge-channels-to-wait))))
 
         ;; 6. Compute commit hashes and write metadata
-        (let [;; Vector commit hash
-              vectors-pending-hashes (when crypto-hash? @(:pending-chunk-hashes vs))
-              vectors-parent-hash (when crypto-hash? @(:commit-hash vs))
-              vectors-commit-hash (when (and crypto-hash? (seq vectors-pending-hashes))
-                                    (vectors/hash-commit vectors-parent-hash vectors-pending-hashes))
+         (let [;; Vector commit hash
+               vectors-pending-hashes (when crypto-hash? @(:pending-chunk-hashes vs))
+               vectors-parent-hash (when crypto-hash? @(:commit-hash vs))
+               vectors-commit-hash (when (and crypto-hash? (seq vectors-pending-hashes))
+                                     (vectors/hash-commit vectors-parent-hash vectors-pending-hashes))
 
               ;; Edge commit hash (from async result)
-              edges-chunk-hashes (when crypto-hash? (:chunk-hashes edges-async-result))
-              edges-commit-hash (when (and crypto-hash? (seq edges-chunk-hashes))
-                                  (edges/hash-commit nil edges-chunk-hashes))
+               edges-chunk-hashes (when crypto-hash? (:chunk-hashes edges-async-result))
+               edges-commit-hash (when (and crypto-hash? (seq edges-chunk-hashes))
+                                   (edges/hash-commit nil edges-chunk-hashes))
 
               ;; Combined index commit hash (used as commit-id when crypto-hash? enabled)
-              final-vectors-hash (or vectors-commit-hash vectors-parent-hash)
-              new-commit-hash (when (and crypto-hash? (or final-vectors-hash edges-commit-hash))
-                                (crypto/hash-index-commit parent-commit-hash final-vectors-hash edges-commit-hash))]
+               final-vectors-hash (or vectors-commit-hash vectors-parent-hash)
+               new-commit-hash (when (and crypto-hash? (or final-vectors-hash edges-commit-hash))
+                                 (crypto/hash-index-commit parent-commit-hash final-vectors-hash edges-commit-hash))]
 
           ;; Update vectors commit-hash atom and atomically remove processed hashes
-          (when crypto-hash?
-            (when vectors-commit-hash
-              (reset! (:commit-hash vs) vectors-commit-hash))
+           (when crypto-hash?
+             (when vectors-commit-hash
+               (reset! (:commit-hash vs) vectors-commit-hash))
             ;; Atomic removal: drop only the hashes we processed, keep any new ones
-            (swap! (:pending-chunk-hashes vs)
-                   #(vec (drop (count vectors-pending-hashes) %))))
+             (swap! (:pending-chunk-hashes vs)
+                    #(vec (drop (count vectors-pending-hashes) %))))
 
           ;; Clear dirty edges
-          (when edge-store
-            (.clearDirty ^PersistentEdgeStore pes))
+           (when edge-store
+             (.clearDirty ^PersistentEdgeStore pes))
 
           ;; 7. Store all PSS structures and create commit
-          (if-let [store (:storage state)]
-            (let [;; Store metadata PSS
-                  meta-pss (:metadata state)
-                  metadata-pss-root (pss/store meta-pss store)
-                  external-id-pss-root (pss/store (:external-id-index state) store)
+           (if-let [store (:storage state)]
+             (let [;; Store metadata PSS
+                   meta-pss (:metadata state)
+                   metadata-pss-root (pss/store meta-pss store)
+                   external-id-pss-root (pss/store (:external-id-index state) store)
 
                   ;; Convert vectors address map to PSS and store
-                  vectors-addr-map @(:chunk-address-map vs)
-                  vectors-addr-pss (storage/map-to-address-pss vectors-addr-map store)
-                  vectors-addr-pss-root (storage/store-address-pss! vectors-addr-pss store)
+                   vectors-addr-map @(:chunk-address-map vs)
+                   vectors-addr-pss (storage/map-to-address-pss vectors-addr-map store)
+                   vectors-addr-pss-root (storage/store-address-pss! vectors-addr-pss store)
 
                   ;; Convert edges address map to PSS and store
-                  edges-addr-pss (storage/map-to-address-pss new-address-map store)
-                  edges-addr-pss-root (storage/store-address-pss! edges-addr-pss store)
+                   edges-addr-pss (storage/map-to-address-pss new-address-map store)
+                   edges-addr-pss-root (storage/store-address-pss! edges-addr-pss store)
 
                   ;; Flush all pending PSS writes
-                  _ (storage/flush-writes! store)
+                   _ (storage/flush-writes! store)
 
                   ;; Generate commit ID using helper
-                  commit-id (writing/generate-commit-id crypto-hash? new-commit-hash)
-                  now (java.util.Date.)
+                   commit-id (writing/generate-commit-id crypto-hash? new-commit-hash)
+                   now (java.util.Date.)
 
                   ;; Determine parents - use opts override or prev-snapshot
-                  prev-commit (:commit-id prev-snapshot)
-                  parents (or (:parents opts)
-                              (writing/determine-parents prev-commit))
+                   prev-commit (:commit-id prev-snapshot)
+                   parents (or (:parents opts)
+                               (writing/determine-parents prev-commit))
 
                   ;; Build the index snapshot with all PSS roots
                   ;; Use index with updated address-map for snapshot building
-                  index-for-snapshot (update-hnsw-index idx {:address-map new-address-map})
-                  snapshot (cond-> (writing/build-index-snapshot index-for-snapshot commit-id parents
-                                                                metadata-pss-root external-id-pss-root
-                                                                vectors-addr-pss-root edges-addr-pss-root
-                                                                now)
-                             (:message opts) (assoc :message (:message opts)))]
+                   index-for-snapshot (update-hnsw-index idx {:address-map new-address-map})
+                   snapshot (cond-> (writing/build-index-snapshot index-for-snapshot commit-id parents
+                                                                  metadata-pss-root external-id-pss-root
+                                                                  vectors-addr-pss-root edges-addr-pss-root
+                                                                  now)
+                              (:message opts) (assoc :message (:message opts)))]
 
               ;; Write commit entry and branch head using helper
-              (writing/write-commit! edge-store commit-id branch snapshot)
+               (writing/write-commit! edge-store commit-id branch snapshot)
 
               ;; Return updated index with new values
-              (update-hnsw-index idx {:address-map new-address-map
-                                      :commit-id commit-id}))
+               (update-hnsw-index idx {:address-map new-address-map
+                                       :commit-id commit-id}))
 
             ;; No storage - just return index with updated address-map
-            (update-hnsw-index idx {:address-map new-address-map})))))))  ; Close: if-let, inner-let, middle-let, outer-let, arity-form, sync!
+             (update-hnsw-index idx {:address-map new-address-map})))))))  ; Close: if-let, inner-let, middle-let, outer-let, arity-form, sync!
 
   (close! [idx]
     (vectors/close! (.-vectors idx))

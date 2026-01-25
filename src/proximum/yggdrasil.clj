@@ -144,15 +144,15 @@
   (commit-graph [_ _opts]
     (when-let [graph (versioning/commit-graph idx)]
       {:nodes (into {}
-                (map (fn [[id info]]
-                       [(str id) {:parent-ids (set (map str (:parents info #{})))
-                                  :meta {:timestamp (:created-at info)
-                                         :branch (when-let [b (:branch info)] (name b))}}]))
-                (:nodes graph))
+                    (map (fn [[id info]]
+                           [(str id) {:parent-ids (set (map str (:parents info #{})))
+                                      :meta {:timestamp (:created-at info)
+                                             :branch (when-let [b (:branch info)] (name b))}}]))
+                    (:nodes graph))
        :branches (into {}
-                   (map (fn [[b commit-id]]
-                          [b (str commit-id)]))
-                   (:branches graph))
+                       (map (fn [[b commit-id]]
+                              [b (str commit-id)]))
+                       (:branches graph))
        :roots (set (map str (:roots graph)))}))
 
   (commit-info [this snap-id] (yp/commit-info this snap-id nil))
