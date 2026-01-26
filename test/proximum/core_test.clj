@@ -3,7 +3,8 @@
             [proximum.core :as core]
             [proximum.protocols :as p]
             [proximum.hnsw.internal :as hnsw.i] ;; Only for address-map (no protocol equivalent)
-            [clojure.set :as set])
+            [clojure.set :as set]
+            [clojure.core.async :as a])
   (:import [java.io File]
            [proximum.internal PersistentEdgeStore Distance]))
 
@@ -124,7 +125,7 @@
                 ;; IDs should be our external IDs (0-9)
                 (is (every? #(<= 0 (:id %) 9) results)))
 
-              (core/close! idx3)))))
+              (a/<!! (core/close! idx3))))))
 
       (finally
         (cleanup path)))))
@@ -154,7 +155,7 @@
             (is (= 10 (count results)))
             (is (every? #(<= 0 (:id %) 99) results)))
 
-          (core/close! idx2)))
+          (a/<!! (core/close! idx2))))
 
       (finally
         (cleanup path)))))
@@ -189,7 +190,7 @@
           (let [idx5 (core/with-metadata idx4 "doc-3" {:entity-id 789})]
             (is (= 789 (:entity-id (core/get-metadata idx5 "doc-3")))))
 
-          (core/close! idx4)))
+          (a/<!! (core/close! idx4))))
 
       (testing "Batch insert with metadata"
         (let [idx (create-test-index {:type :hnsw
@@ -211,7 +212,7 @@
           (is (= 4 (:val (core/get-metadata idx2 "d"))))
           (is (= 5 (:val (core/get-metadata idx2 "e"))))
 
-          (core/close! idx2)))
+          (a/<!! (core/close! idx2))))
 
       (finally
         (cleanup path)
@@ -253,7 +254,7 @@
           ;; Verify PES are different objects (forked)
           (is (not (identical? (p/edge-storage idx2) (p/edge-storage idx-fork))))
 
-          (core/close! idx2)))
+          (a/<!! (core/close! idx2))))
 
       (testing "Modifications after fork are independent"
         (let [idx (create-test-index {:type :hnsw
@@ -290,8 +291,8 @@
           (is (= {:source :fork-insert :external-id "fork-new"} (core/get-metadata idx-fork2 "fork-new")))
           (is (nil? (core/get-metadata idx2 "fork-new")))
 
-          (core/close! idx2)
-          (core/close! idx-fork2)))
+          (a/<!! (core/close! idx2))
+          (a/<!! (core/close! idx-fork2))))
 
       (finally
         (cleanup path)
@@ -338,7 +339,7 @@
             (is (>= mean-recall 0.9)
                 (str "Mean recall " mean-recall " should be >= 0.9")))
 
-          (core/close! idx2)))
+          (a/<!! (core/close! idx2))))
 
       (finally
         (cleanup path)))))
@@ -371,7 +372,7 @@
           ;; IDs should be our external IDs
           (is (every? #(#{"a" "b" "c"} (:id %)) results))
 
-          (core/close! idx2)))
+          (a/<!! (core/close! idx2))))
 
       (finally
         (cleanup path)))))
@@ -413,7 +414,7 @@
             (is (= 5 (count results)))
             (is (some #(= 0 (:id %)) results) "Should find queried node"))
 
-          (core/close! idx3)))
+          (a/<!! (core/close! idx3))))
 
       (finally
         (cleanup path)))))
@@ -448,7 +449,7 @@
           ;; All results should be from category :a (ids 0-9)
           (is (every? #(< (:id %) 10) results))
 
-          (core/close! idx2)))
+          (a/<!! (core/close! idx2))))
 
       (testing "Filtered search with ID set"
         (let [idx (create-test-index {:type :hnsw
@@ -468,7 +469,7 @@
           (is (<= (count results) 5))
           (is (every? #(#{0 2 4 6 8} (:id %)) results))
 
-          (core/close! idx2)))
+          (a/<!! (core/close! idx2))))
 
       (finally
         (cleanup path)
@@ -499,7 +500,7 @@
             (is (not (identical? (p/edge-storage idx2) (p/edge-storage forked)))
                 "Forked PES should be different object"))
 
-          (core/close! idx2)))
+          (a/<!! (core/close! idx2))))
 
       (testing "Fork is independent - modifications don't affect original"
         (let [idx (create-test-index {:type :hnsw
@@ -525,7 +526,7 @@
           (is (> (.countEdges ^PersistentEdgeStore (p/edge-storage forked2))
                  (.countEdges ^PersistentEdgeStore (p/edge-storage idx2))))
 
-          (core/close! idx2)))
+          (a/<!! (core/close! idx2))))
 
       (testing "Search works correctly on forked index"
         (let [idx (create-test-index {:type :hnsw
@@ -546,7 +547,7 @@
             (is (= (set (map :id results-orig))
                    (set (map :id results-fork)))))
 
-          (core/close! idx2)))
+          (a/<!! (core/close! idx2))))
 
       (finally
         (cleanup path)
@@ -589,7 +590,7 @@
             (.clearDirty ^PersistentEdgeStore pes2)
             (is (not (.hasDirtyChunks ^PersistentEdgeStore pes2)))
 
-            (core/close! idx2))))
+            (a/<!! (core/close! idx2)))))
 
       (testing "Fork starts with empty dirty set"
         (let [idx (create-test-index {:type :hnsw
@@ -612,7 +613,7 @@
             (is (not (.hasDirtyChunks ^PersistentEdgeStore pes-forked))
                 "Forked PES should have empty dirty set"))
 
-          (core/close! idx2)))
+          (a/<!! (core/close! idx2))))
 
       (finally
         (cleanup path)
@@ -644,7 +645,7 @@
               (is (= 100 (core/capacity idx3)))
               (is (= 89 (core/remaining-capacity idx3)))))
 
-          (core/close! idx)))
+          (a/<!! (core/close! idx))))
 
       (testing "Capacity exceeded error has helpful message"
         (let [idx (create-test-index {:type :hnsw
@@ -662,7 +663,7 @@
                                 #"capacity exceeded"
                                 (core/insert idx2 (random-vec 32) "overflow")))
 
-          (core/close! idx2)))
+          (a/<!! (core/close! idx2))))
 
       (finally
         (cleanup path)
@@ -692,7 +693,7 @@
             (is (pos? dirty-count)))
 
           ;; Flush persists edges - returns updated index with new address-map
-          (let [idx2 (core/flush! idx2)]
+          (let [idx2 (a/<!! (core/flush! idx2))]
 
             ;; After flush, PES has no dirty chunks
             (is (not (.hasDirtyChunks ^PersistentEdgeStore pes)))
@@ -700,7 +701,7 @@
             ;; address-map should now have entries (plain value, no @ needed)
             (is (pos? (count (hnsw.i/address-map idx2)))))
 
-          (core/close! idx2)))
+          (a/<!! (core/close! idx2))))
 
       (testing "Edges restored on load - no rebuild needed"
         (let [idx (create-test-index {:type :hnsw
@@ -714,38 +715,38 @@
               idx2 (core/insert-batch idx vecs ids)]
 
           ;; Sync to persist everything
-          (core/sync! idx2)
+          (let [idx2 (a/<!! (core/sync! idx2))]
 
-          ;; Record edge count for comparison
-          (let [orig-edge-count (.countEdges ^PersistentEdgeStore (p/edge-storage idx2))
-                orig-entrypoint (.getEntrypoint ^PersistentEdgeStore (p/edge-storage idx2))
-                query (random-vec 32)
-                orig-results (core/search idx2 query 10 {:ef 50})]
+            ;; Record edge count for comparison
+            (let [orig-edge-count (.countEdges ^PersistentEdgeStore (p/edge-storage idx2))
+                  orig-entrypoint (.getEntrypoint ^PersistentEdgeStore (p/edge-storage idx2))
+                  query (random-vec 32)
+                  orig-results (core/search idx2 query 10 {:ef 50})]
 
-            (core/close! idx2)
+              (a/<!! (core/close! idx2))
 
-            ;; Now load the index
-            (let [base (str storage-path "-load")
-                  loaded (core/load (store-config-for base *store-id*)
-                                    :mmap-dir (mmap-dir-for base))
-                  loaded-edge-count (.countEdges ^PersistentEdgeStore (p/edge-storage loaded))
-                  loaded-entrypoint (.getEntrypoint ^PersistentEdgeStore (p/edge-storage loaded))]
+              ;; Now load the index
+              (let [base (str storage-path "-load")
+                    loaded (core/load (store-config-for base *store-id*)
+                                      :mmap-dir (mmap-dir-for base))
+                    loaded-edge-count (.countEdges ^PersistentEdgeStore (p/edge-storage loaded))
+                    loaded-entrypoint (.getEntrypoint ^PersistentEdgeStore (p/edge-storage loaded))]
 
-              ;; Edge count should match
-              (is (= orig-edge-count loaded-edge-count)
-                  "Loaded index should have same edge count")
+                ;; Edge count should match
+                (is (= orig-edge-count loaded-edge-count)
+                    "Loaded index should have same edge count")
 
-              ;; Entrypoint should match
-              (is (= orig-entrypoint loaded-entrypoint)
-                  "Loaded index should have same entrypoint")
+                ;; Entrypoint should match
+                (is (= orig-entrypoint loaded-entrypoint)
+                    "Loaded index should have same entrypoint")
 
-              ;; Search should return same results
-              (let [loaded-results (core/search loaded query 10 {:ef 50})]
-                (is (= (set (map :id orig-results))
-                       (set (map :id loaded-results)))
-                    "Search results should match after reload"))
+                ;; Search should return same results
+                (let [loaded-results (core/search loaded query 10 {:ef 50})]
+                  (is (= (set (map :id orig-results))
+                         (set (map :id loaded-results)))
+                      "Search results should match after reload"))
 
-              (core/close! loaded)))))
+                (a/<!! (core/close! loaded)))))))
 
       (finally
         (cleanup storage-path)
@@ -781,8 +782,8 @@
                 "Deleted nodes should not appear in search results"))
 
           ;; Sync to persist
-          (core/sync! idx3)
-          (core/close! idx3)
+          (a/<!! (core/sync! idx3))
+          (a/<!! (core/close! idx3))
 
           ;; Reopen the index
           (let [loaded (core/load (store-config-for storage-path *store-id*)
@@ -796,7 +797,7 @@
               (is (not (some #(contains? #{5 15 25} (:id %)) loaded-results))
                   "Deleted nodes should not appear in search results after reload"))
 
-            (core/close! loaded))))
+            (a/<!! (core/close! loaded)))))
 
       (finally
         (cleanup storage-path)))))
@@ -843,7 +844,7 @@
           (is (pos? (:avg-edges-per-node metrics)))
           (is (= :main (:branch metrics)))
 
-          (core/close! idx2)))
+          (a/<!! (core/close! idx2))))
 
       (testing "Metrics update after delete"
         (let [idx (create-test-index {:type :hnsw
@@ -868,7 +869,7 @@
           (is (= 0.3 (:deletion-ratio metrics)))
           (is (true? (:needs-compaction? metrics)))
 
-          (core/close! idx3)))
+          (a/<!! (core/close! idx3))))
 
       (testing "needs-compaction? with custom threshold"
         (let [idx (create-test-index {:type :hnsw
@@ -888,7 +889,7 @@
           ;; With lower threshold
           (is (true? (core/needs-compaction? idx3 0.05)))
 
-          (core/close! idx3)))
+          (a/<!! (core/close! idx3))))
 
       (finally
         (cleanup path)
@@ -937,8 +938,8 @@
                 results (core/search compacted query 5 {:ef 50})]
             (is (= 5 (count results))))
 
-          (core/close! idx3)
-          (core/close! compacted)))
+          (a/<!! (core/close! idx3))
+          (a/<!! (core/close! compacted))))
 
       (finally
         (cleanup path)
@@ -982,7 +983,7 @@
             ;; First result should be doc-1 (exact match)
             (is (= "doc-1" (:id (first results)))))
 
-          (core/close! idx2)))
+          (a/<!! (core/close! idx2))))
 
       (testing "transient with metadata using assoc!"
         (let [idx (create-test-index {:type :hnsw
@@ -1001,7 +1002,7 @@
           (is (= 1 (count idx2)))
           (is (= :test (:type (core/get-metadata idx2 "doc-1"))))
 
-          (core/close! idx2)))
+          (a/<!! (core/close! idx2))))
 
       (testing "transient count reflects pending operations"
         (let [idx (create-test-index {:type :hnsw
@@ -1035,7 +1036,7 @@
           (is (some? (get idx2 "b")))
           (is (some? (get idx2 "c")))
 
-          (core/close! idx2)))
+          (a/<!! (core/close! idx2))))
 
       (finally
         (cleanup path)

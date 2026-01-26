@@ -326,11 +326,11 @@
    Closes the new index and attempts to delete created files."
   [state]
   (let [{:keys [store-config mmap-dir]} (get-in state [:config :target])]
-    ;; Close new index
+    ;; Close new index (must await async close! before deleting files)
     (when-let [batch-state (.-batch-state state)]
       (when-let [new-idx (:idx @batch-state)]
         (try
-          (p/close! new-idx)
+          (a/<!! (p/close! new-idx))
           (catch Exception e
             (log/warn :proximum/compaction "Error closing partial index during cleanup"
                       {:error (.getMessage e)})))))
