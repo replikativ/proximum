@@ -114,8 +114,8 @@ public class SpringAiIntegrationTest {
             store.delete(List.of("doc-1"));
             System.out.println("4. Deleted doc-1, count: " + store.count());
 
-            // Test sync
-            store.sync();
+            // Test sync (sync returns CompletableFuture)
+            store.sync().join();
             System.out.println("5. Synced to storage");
 
             // Verify VectorStore interface compliance

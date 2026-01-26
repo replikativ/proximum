@@ -13,6 +13,7 @@ import dev.langchain4j.store.embedding.EmbeddingStore;
 import dev.langchain4j.store.embedding.filter.Filter;
 
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * LangChain4j EmbeddingStore implementation backed by Proximum.
@@ -284,30 +285,30 @@ public class ProximumEmbeddingStore implements EmbeddingStore<TextSegment> {
 
     /**
      * Sync all data to durable storage.
-     * Blocks until sync completes.
+     * Returns CompletableFuture that completes when sync finishes.
+     * Call .join() or .get() if you need to block.
      */
-    public void sync() {
-        try {
-            store = store.sync().get();
-        } catch (Exception e) {
-            throw new RuntimeException("Sync failed", e);
-        }
+    public CompletableFuture<Void> sync() {
+        return store.sync().thenApply(newStore -> {
+            store = newStore;
+            return null;
+        });
     }
 
     /**
      * Sync all data to durable storage with a commit message.
-     * Blocks until sync completes.
+     * Returns CompletableFuture that completes when sync finishes.
+     * Call .join() or .get() if you need to block.
      *
      * @param message the commit message
      */
-    public void sync(String message) {
-        try {
-            Map<String, Object> opts = new HashMap<>();
-            opts.put(":message", message);
-            store = store.sync(opts).get();
-        } catch (Exception e) {
-            throw new RuntimeException("Sync failed", e);
-        }
+    public CompletableFuture<Void> sync(String message) {
+        Map<String, Object> opts = new HashMap<>();
+        opts.put(":message", message);
+        return store.sync(opts).thenApply(newStore -> {
+            store = newStore;
+            return null;
+        });
     }
 
     /**

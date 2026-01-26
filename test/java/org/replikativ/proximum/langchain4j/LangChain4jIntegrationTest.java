@@ -123,8 +123,8 @@ public class LangChain4jIntegrationTest {
             assert store instanceof EmbeddingStore : "Must implement EmbeddingStore";
             System.out.println("8. Implements EmbeddingStore<TextSegment>: ✓");
 
-            // Test sync and close
-            store.sync();
+            // Test sync and close (sync returns CompletableFuture)
+            store.sync().join();
             store.close();
             System.out.println("9. Synced and closed");
 
