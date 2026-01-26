@@ -50,9 +50,10 @@ Perfect for **RAG applications**, **semantic search**, and **ML experimentation*
 (def results (prox/search idx3 (float-array (repeatedly 384 rand)) 5))
 ; => ({:id "doc-1", :distance 0.234} {:id "doc-2", :distance 0.456} ...)
 
-;; Git-like branching
-(prox/sync! idx3)
-(def experiment (prox/branch! idx3 "experiment"))
+;; Git-like branching (sync! is async - returns channel)
+(require '[clojure.core.async :as a])
+(let [idx3 (a/<!! (prox/sync! idx3))]  ; Block until persisted
+  (def experiment (prox/branch! idx3 "experiment")))
 ```
 
 📖 [Full Clojure Guide](docs/CLOJURE_GUIDE.md)
@@ -76,12 +77,12 @@ try (ProximumVectorStore store = ProximumVectorStore.builder()
     List<SearchResult> results = store.search(queryVector, 5);
     // => [SearchResult{id=doc-1, distance=0.234}, ...]
 
-    // Git-like versioning
-    store.sync();  // Create commit
+    // Git-like versioning (sync() is async - returns CompletableFuture)
+    store = store.sync().get();  // Block until persisted
     UUID snapshot1 = store.getCommitId();
 
     store = store.add(embedding3, "doc-3");
-    store.sync();
+    store = store.sync().get();
 
     // Time travel: Query historical state
     ProximumVectorStore historical = ProximumVectorStore.connectCommit(
@@ -138,9 +139,9 @@ implementation 'org.replikativ:proximum:LATEST'
 Every `sync()` creates a commit. Query any historical state:
 
 ```java
-index.sync();  // Snapshot 1
+index = index.sync().get();  // Snapshot 1 (blocks until persisted)
 // ... make changes ...
-index.sync();  // Snapshot 2
+index = index.sync().get();  // Snapshot 2
 
 // Time travel to earlier state
 ProximumVectorStore historical = index.asOf(commitId);
@@ -153,11 +154,11 @@ ProximumVectorStore historical = index.asOf(commitId);
 Fork an index for experiments without copying data:
 
 ```java
-index.sync();
+index = index.sync().get();
 ProximumVectorStore experiment = index.branch("new-model");
 
 // Test different embeddings
-experiment.add(newEmbedding, "doc-1");
+experiment = experiment.add(newEmbedding, "doc-1");
 
 // Merge or discard - original unchanged
 ```
@@ -171,6 +172,58 @@ experiment.add(newEmbedding, "doc-1");
 - **Compaction**: Reclaim space from deleted vectors
 - **Garbage Collection**: Clean up unreachable commits
 - **[Crypto-Hash](docs/CRYPTO_HASH_GUIDE.md)**: Tamper-proof audit trail with SHA-512
+
+### ⚡ Async Operations
+
+Storage operations are non-blocking and return immediately for efficient I/O:
+
+**Async Operations:**
+- `sync!` / `sync()` - Persist changes and create commit
+- `flush!` / `flush()` - Force pending writes to storage
+- `gc!` / `gc()` - Garbage collect unreachable commits
+- `close!` / `close()` - Release resources (mmap, file handles)
+
+**Clojure - Blocking:**
+```clojure
+(require '[clojure.core.async :as a])
+
+;; Wait for completion
+(let [idx2 (a/<!! (prox/sync! idx))]
+  ;; idx2 is the updated index
+  (prox/search idx2 query 5))
+
+;; Chain operations
+(-> idx
+    (prox/insert vector "id")
+    (prox/sync!)
+    (a/<!!)
+    (prox/close!)
+    (a/<!!))
+```
+
+**Clojure - Async composition:**
+```clojure
+(a/go
+  (let [idx2 (a/<! (prox/sync! idx))
+        idx3 (a/<! (prox/flush! idx2))]
+    (a/<! (prox/close! idx3))))
+```
+
+**Java - Blocking:**
+```java
+// Block with .get() or .join()
+store = store.sync().get();
+store = store.flush().join();
+store.close().get();
+```
+
+**Java - Async chaining:**
+```java
+store.sync()
+     .thenCompose(s -> s.flush())
+     .thenCompose(s -> s.close())
+     .get();  // Only block at the end
+```
 
 ---
 
