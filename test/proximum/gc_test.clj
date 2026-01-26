@@ -9,6 +9,7 @@
    - Edge cases (in-memory index, empty index)
    - Whitelist preservation (:branches, :index/config)"
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
+            [clojure.core.async :as a]
             [proximum.core :as core]
             [proximum.gc :as gc]
             [proximum.protocols :as p]
@@ -75,10 +76,10 @@
                                                    (keyword (str "v" i))))
                                     idx
                                     (range 10))
-              idx-synced (p/sync! idx-with-data)]
+              idx-synced (a/<!! (p/sync! idx-with-data))]
 
           ;; Run GC with epoch (remove nothing by time)
-          (let [deleted (gc/gc! idx-synced (Date. 0))]
+          (let [deleted (a/<!! (gc/gc! idx-synced (Date. 0)))]
             ;; Should delete nothing (all data is reachable from :main)
             (is (empty? deleted) "No garbage to collect with active index")))
 
@@ -93,8 +94,8 @@
                                   :store-config {:backend :memory
                                                  :id (java.util.UUID/randomUUID)}})
           idx-with-data (core/insert idx (float-array [1.0 2.0 3.0 4.0]) :a)
-          idx-synced (p/sync! idx-with-data)
-          deleted (gc/gc! idx-synced)]
+          idx-synced (a/<!! (p/sync! idx-with-data))
+          deleted (a/<!! (gc/gc! idx-synced))]
 
       ;; Memory backend can be GC'd too
       (is (coll? deleted) "Returns collection of deleted keys"))))
@@ -116,7 +117,7 @@
 
           ;; Create first commit
           (let [idx1 (core/insert idx (float-array [1.0 2.0 3.0 4.0]) :a)
-                idx1-synced (p/sync! idx1)
+                idx1-synced (a/<!! (p/sync! idx1))
                 commit1-id (p/current-commit idx1-synced)]
 
             ;; Wait a bit to ensure timestamp difference
@@ -128,11 +129,11 @@
 
               ;; Create second commit
               (let [idx2 (core/insert idx1-synced (float-array [5.0 6.0 7.0 8.0]) :b)
-                    idx2-synced (p/sync! idx2)
+                    idx2-synced (a/<!! (p/sync! idx2))
                     commit2-id (p/current-commit idx2-synced)]
 
                 ;; GC with cutoff after commit1 but before commit2
-                (let [deleted (gc/gc! idx2-synced cutoff)]
+                (let [deleted (a/<!! (gc/gc! idx2-synced cutoff))]
 
                   (is (some? commit1-id))
                   (is (some? commit2-id))
@@ -162,12 +163,12 @@
                                       :mmap-dir (:mmap-dir layout)})
               ;; Create data on main
               idx1 (core/insert idx (float-array [1.0 2.0 3.0 4.0]) :a)
-              idx1-synced (p/sync! idx1)]
+              idx1-synced (a/<!! (p/sync! idx1))]
 
           ;; Create feature branch
           (let [idx-feature (versioning/branch! idx1-synced :feature)
                 idx-feature2 (core/insert idx-feature (float-array [5.0 6.0 7.0 8.0]) :b)
-                idx-feature-synced (p/sync! idx-feature2)]
+                idx-feature-synced (a/<!! (p/sync! idx-feature2))]
 
             ;; Get store to verify branches
             (let [store (p/raw-storage idx-feature-synced)
@@ -177,7 +178,7 @@
               (is (contains? branches :feature) "Feature branch exists")
 
               ;; Run GC
-              (let [deleted (gc/gc! idx-feature-synced)]
+              (let [deleted (a/<!! (gc/gc! idx-feature-synced))]
                 ;; Should preserve both branches
                 (is (empty? deleted) "All data reachable from either branch")))))
 
@@ -200,12 +201,12 @@
                                       :mmap-dir (:mmap-dir layout)})
               ;; Create data on main
               idx1 (core/insert idx (float-array [1.0 2.0 3.0 4.0]) :a)
-              idx1-synced (p/sync! idx1)]
+              idx1-synced (a/<!! (p/sync! idx1))]
 
           ;; Create temp branch with unique data
           (let [idx-temp (versioning/branch! idx1-synced :temp-branch)
                 idx-temp2 (core/insert idx-temp (float-array [9.0 9.0 9.0 9.0]) :temp-data)
-                idx-temp-synced (p/sync! idx-temp2)
+                idx-temp-synced (a/<!! (p/sync! idx-temp2))
                 store (p/raw-storage idx-temp-synced)]
 
             ;; Verify temp branch exists
@@ -221,7 +222,7 @@
 
             ;; Run GC with far future cutoff to collect temp branch commits
             (let [far-future (Date. (+ (System/currentTimeMillis) 999999999))
-                  deleted (gc/gc! idx1-synced far-future)]
+                  deleted (a/<!! (gc/gc! idx1-synced far-future))]
               ;; Should collect orphaned temp-branch data
               ;; (temp branch commits are now unreachable and before cutoff)
               (is (pos? (count deleted)) "Orphaned data collected"))))
@@ -242,8 +243,8 @@
                                       :capacity 100
                                       :store-config (file-store-config (:store-path layout))
                                       :mmap-dir (:mmap-dir layout)})
-              idx-synced (p/sync! idx)
-              deleted (gc/gc! idx-synced)]
+              idx-synced (a/<!! (p/sync! idx))
+              deleted (a/<!! (gc/gc! idx-synced))]
 
           ;; Empty index has minimal data, nothing to collect
           (is (empty? deleted) "No data to collect from empty index"))
@@ -264,12 +265,12 @@
                                       :capacity 100
                                       :store-config (file-store-config (:store-path layout))
                                       :mmap-dir (:mmap-dir layout)})
-              idx-synced (p/sync! idx)
+              idx-synced (a/<!! (p/sync! idx))
               store (p/raw-storage idx-synced)]
 
           ;; Run GC with far future cutoff (would remove everything by time)
           (let [far-future (Date. (+ (System/currentTimeMillis) 999999999))
-                deleted (gc/gc! idx-synced far-future)]
+                deleted (a/<!! (gc/gc! idx-synced far-future))]
 
             ;; Verify global keys still exist
             (is (some? (k/get store :branches nil {:sync? true})) ":branches preserved")
@@ -302,10 +303,10 @@
                                                    (keyword (str "v" i))))
                                     idx
                                     (range 5))
-              idx-synced (p/sync! idx-with-data)]
+              idx-synced (a/<!! (p/sync! idx-with-data))]
 
           ;; Run GC with small batch size (should still work correctly)
-          (let [deleted (gc/gc! idx-synced (Date. 0) {:batch-size 10})]
+          (let [deleted (a/<!! (gc/gc! idx-synced (Date. 0) {:batch-size 10}))]
             ;; Should work same as default batch size
             (is (empty? deleted) "No garbage with small batch size")))
 

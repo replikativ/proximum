@@ -169,6 +169,17 @@
    [:path {:optional true} :string]
    [:id :uuid]])
 
+(def AsyncResult
+  "Wrapper for operations that return core.async channels.
+   [:async T] means 'returns channel that delivers T'.
+   Maps to CompletableFuture<T> in Java.
+
+   Example:
+     [:async VectorIndex] -> CompletableFuture<ProximumVectorStore>
+     [:async [:set :any]] -> CompletableFuture<Set<Object>>"
+  [:fn {:error/message "async result wrapper"}
+   (fn [_x] true)])  ;; Semantic marker, always valid
+
 (def ConnectOptions
   "Options for connect operations."
   [:map {:closed false}
@@ -314,9 +325,12 @@ Example:
      :supports-remote? true}
 
     close!
-    {:args [:=> [:cat VectorIndex] :nil]
-     :ret  :nil
-     :doc  "Close the index and release resources (mmap, caches, stores)."
+    {:args [:=> [:cat VectorIndex] [:async :nil]]
+     :ret  [:async :nil]
+     :doc  "Close the index and release resources (mmap, caches, stores).
+Returns channel that delivers nil when cleanup completes.
+Clojure: can ignore return value (fire-and-forget).
+Java: close() blocks until cleanup is complete."
      :impl proximum.protocols/close!
      :referentially-transparent? false
      :supports-remote? false}
@@ -498,21 +512,22 @@ Example:
     ;; =========================================================================
 
     sync!
-    {:args [:=> [:cat VectorIndex [:? :map]] VectorIndex]
-     :ret  VectorIndex
+    {:args [:=> [:cat VectorIndex [:? :map]] [:async VectorIndex]]
+     :ret  [:async VectorIndex]
      :doc  "Persist current state to durable storage, creating a commit.
-Waits for all pending writes to complete.
+Returns channel that delivers updated index when all pending writes complete.
 
-With {:sync? true}, blocks until complete.
-Default returns channel that delivers index when done."
+In Clojure: use <! in go-block or <!! to block.
+In Java: returns CompletableFuture<ProximumVectorStore>."
      :impl proximum.protocols/sync!
      :referentially-transparent? false
      :supports-remote? true}
 
     flush!
-    {:args [:=> [:cat VectorIndex] VectorIndex]
-     :ret  VectorIndex
-     :doc  "Force pending writes to storage without creating commit."
+    {:args [:=> [:cat VectorIndex] [:async VectorIndex]]
+     :ret  [:async VectorIndex]
+     :doc  "Force pending writes to storage without creating commit.
+Returns channel that delivers updated index when writes complete."
      :impl proximum.protocols/flush!
      :referentially-transparent? false
      :supports-remote? false}
@@ -574,9 +589,9 @@ Returns CompactionState wrapper for use during compaction."
      :supports-remote? true}
 
     finish-online-compaction!
-    {:args [:=> [:cat :any] VectorIndex]
-     :ret  VectorIndex
-     :doc  "Finish online compaction and return new index."
+    {:args [:=> [:cat :any] [:async VectorIndex]]
+     :ret  [:async VectorIndex]
+     :doc  "Finish online compaction and return new index (async)."
      :impl proximum.compaction/finish-online-compaction!
      :referentially-transparent? false
      :supports-remote? true}
@@ -603,9 +618,10 @@ Returns {:copying? bool :finished? bool :delta-count N :mapped-ids N}"
     ;; =========================================================================
 
     gc!
-    {:args [:=> [:cat VectorIndex [:? :any] [:? :map]] [:set :any]]
-     :ret  [:set :any]
+    {:args [:=> [:cat VectorIndex [:? :any] [:? :map]] [:async [:set :any]]]
+     :ret  [:async [:set :any]]
      :doc  "Garbage collect unreachable data from storage.
+Returns channel that delivers set of deleted keys when GC completes.
 Removes commits older than remove-before date."
      :impl proximum.gc/gc!
      :referentially-transparent? false

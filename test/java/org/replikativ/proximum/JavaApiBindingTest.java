@@ -198,18 +198,18 @@ class JavaApiBindingTest {
                 for (int i = 0; i < 5; i++) {
                     store.addAndGetId(randomVector(32));
                 }
-                store.sync();
+                store.sync().get();
 
                 // Delete one to create garbage
                 Object firstId = store.addAndGetId(randomVector(32));
-                store.sync();
+                store.sync().get();
                 store.delete(firstId);
-                store.sync();
+                store.sync().get();
 
-                // gc() may return Set<Object> or throw if nothing to collect
+                // gc() returns CompletableFuture<Set<Object>>
                 // Just verify it's callable - actual gc behavior tested in Clojure tests
                 try {
-                    Object result = store.gc();
+                    Object result = store.gc().get();  // Wait for async completion
                     // If it returns, should be a Set (possibly empty)
                     if (result != null) {
                         assertInstanceOf(Set.class, result, "gc() result should be a Set");
@@ -232,10 +232,10 @@ class JavaApiBindingTest {
                     .build()) {
 
                 store.addAndGetId(randomVector(32));
-                store.sync();
+                store.sync().get();
 
                 store.addAndGetId(randomVector(32));
-                store.sync();
+                store.sync().get();
 
                 List<Map<String, Object>> history = store.getHistory();
 
@@ -271,7 +271,7 @@ class JavaApiBindingTest {
                 Object id1 = store.addAndGetId(randomVector(32));
                 store.addAndGetId(randomVector(32));
                 store.addAndGetId(randomVector(32));
-                store.sync();
+                store.sync().get();
 
                 ProximumVectorStore afterDelete = store.delete(id1);
                 afterDelete.sync();
@@ -432,7 +432,7 @@ class JavaApiBindingTest {
                     .build()) {
 
                 store.addAndGetId(randomVector(32));
-                store.sync();
+                store.sync().get();
 
                 Set<String> branches = store.listBranches();
                 assertNotNull(branches, "listBranches() should return non-null");
@@ -466,7 +466,7 @@ class JavaApiBindingTest {
                     .build()) {
 
                 store.addAndGetId(randomVector(32));
-                store.sync();
+                store.sync().get();
 
                 UUID commitId = store.getCommitId();
                 System.out.println("getCommitId() result: " + commitId);
@@ -497,13 +497,13 @@ class JavaApiBindingTest {
 
                 store.addAndGetId(randomVector(32));
                 store.addAndGetId(randomVector(32));
-                store.sync();
+                store.sync().get();
 
                 UUID hash1 = store.getCommitHash();
                 assertNotNull(hash1, "getCommitHash() should return non-null after sync");
 
                 store.addAndGetId(randomVector(32));
-                store.sync();
+                store.sync().get();
 
                 UUID hash2 = store.getCommitHash();
                 assertNotNull(hash2, "getCommitHash() should be non-null after second sync");

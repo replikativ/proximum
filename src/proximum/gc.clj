@@ -211,7 +211,8 @@
      :batch-size - Deletion batch size (default 1000)
 
    Returns:
-     Set of deleted keys"
+     Channel that delivers set of deleted keys when GC completes.
+     Use <! in go-block or <!! to block."
   ([idx] (gc! idx (java.util.Date. 0)))
   ([idx remove-before] (gc! idx remove-before {}))
   ([idx remove-before {:keys [batch-size] :or {batch-size 1000}}]
@@ -224,10 +225,8 @@
          ;; Get all branches
          branches (or (k/get edge-store :branches nil {:sync? true}) #{})
          ;; Mark reachable keys
-         whitelist (mark-reachable edge-store storage branches remove-before)
-         ;; Sweep unreachable keys (blocking)
-         result-ch (k-gc/sweep! edge-store whitelist remove-before batch-size)]
-     ;; Block and return the result
-     (clojure.core.async/<!! result-ch))))
+         whitelist (mark-reachable edge-store storage branches remove-before)]
+     ;; Return channel directly - no blocking
+     (k-gc/sweep! edge-store whitelist remove-before batch-size))))
 
 ;; Note: history function moved to proximum.versioning

@@ -284,18 +284,30 @@ public class ProximumEmbeddingStore implements EmbeddingStore<TextSegment> {
 
     /**
      * Sync all data to durable storage.
+     * Blocks until sync completes.
      */
     public void sync() {
-        store = store.sync();
+        try {
+            store = store.sync().get();
+        } catch (Exception e) {
+            throw new RuntimeException("Sync failed", e);
+        }
     }
 
     /**
      * Sync all data to durable storage with a commit message.
+     * Blocks until sync completes.
      *
      * @param message the commit message
      */
     public void sync(String message) {
-        store = store.sync(message);
+        try {
+            Map<String, Object> opts = new HashMap<>();
+            opts.put(":message", message);
+            store = store.sync(opts).get();
+        } catch (Exception e) {
+            throw new RuntimeException("Sync failed", e);
+        }
     }
 
     /**

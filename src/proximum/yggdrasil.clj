@@ -12,7 +12,8 @@
             [proximum.versioning :as versioning]
             [yggdrasil.protocols :as yp]
             [yggdrasil.types :as t]
-            [konserve.core :as k]))
+            [konserve.core :as k]
+            [clojure.core.async :as a]))
 
 (declare ->ProximumSystem)
 
@@ -169,7 +170,7 @@
   (merge! [this source] (yp/merge! this source {}))
   (merge! [_ source _opts]
     (let [source-kw (keyword (clojure.core/name source))
-          synced-idx (versioning/merge! idx source-kw {:ids :all})]
+          synced-idx (a/<!! (versioning/merge! idx source-kw {:ids :all}))]
       (->ProximumSystem synced-idx mmap-dir system-name)))
 
   (conflicts [this _a _b] (yp/conflicts this _a _b nil))

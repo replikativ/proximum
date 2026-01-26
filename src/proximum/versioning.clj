@@ -32,6 +32,7 @@
             [proximum.vectors :as vectors]
             [proximum.logging :as log]
             [konserve.core :as k]
+            [clojure.core.async :as a]
             [clojure.java.io :as io]))
 
 ;; -----------------------------------------------------------------------------
@@ -402,8 +403,11 @@
         merge-parents (or parents
                           #{(p/current-commit idx)
                             (:commit-id source-snapshot)})
-        ;; Sync with merge parents to create the merge commit
-        synced-idx (p/sync! merged-idx {:parents merge-parents
-                                        :message message})]
+        ;; Sync with merge parents to create the merge commit - returns channel
+        sync-chan (p/sync! merged-idx {:parents merge-parents
+                                       :message message})]
+    ;; Close source index and return channel
     (p/close! source-idx)
-    synced-idx))
+    ;; Return channel that delivers synced index
+    (a/go
+      (a/<! sync-chan))))

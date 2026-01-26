@@ -24,6 +24,7 @@
             [proximum.storage :as storage]
             [proximum.metadata :as meta]
             [proximum.logging :as log]
+            [clojure.core.async :as a]
             [clojure.java.io :as io]
             [konserve.core :as k])
   (:import [proximum.internal PersistentEdgeStore]))
@@ -599,11 +600,12 @@
   (sync!
     ([state] (p/sync! state {}))
     ([state opts]
-    ;; Sync delegates to source during compaction
-     (let [synced-source (p/sync! (.-source-idx state) opts)]
-       (CompactionState. synced-source (.-batch-state state) (.-delta-log state)
-                         (.-copy-future state) (.-finished? state) (.-error-atom state)
-                         (.-config state) (.-_meta state)))))
+    ;; Sync delegates to source during compaction - returns channel
+     (a/go
+       (let [synced-source (a/<! (p/sync! (.-source-idx state) opts))]
+         (CompactionState. synced-source (.-batch-state state) (.-delta-log state)
+                           (.-copy-future state) (.-finished? state) (.-error-atom state)
+                           (.-config state) (.-_meta state))))))
 
   (flush! [state]
     ;; Properly thread the source-idx through
@@ -802,6 +804,7 @@
              delta-log)]
 
         (log/info :proximum/compaction "Online compaction complete, syncing")
+        ;; Return channel from sync!
         (p/sync! final-idx)))
 
     (catch Exception e

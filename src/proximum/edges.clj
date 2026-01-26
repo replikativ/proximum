@@ -200,33 +200,38 @@
      :chunk-hashes - Vector of hashes for chunks written in this sync (for crypto-hash)
      :parent-commit-hash - Parent commit hash (for crypto-hash chain)
 
-   Returns {:address-map ... :commit-hash ...}."
+   Returns:
+     Channel that delivers {:address-map ... :commit-hash ...} when sync completes."
   ([store pes pending-channels address-map new-addresses]
    (sync-edges! store pes pending-channels address-map new-addresses {}))
   ([store ^PersistentEdgeStore pes pending-channels address-map new-addresses
     {:keys [softify? chunk-hashes parent-commit-hash] :or {softify? false}}]
-   ;; Wait for all pending chunk writes (async writes, need to wait)
-   (doseq [ch pending-channels]
-     (a/<!! ch))
+   ;; Wait for all pending chunk writes asynchronously
+   (a/go
+     (try
+       (doseq [ch pending-channels]
+         (a/<! ch))
 
-   ;; Compute commit hash if we have new chunk hashes
-   (let [new-commit-hash (when (seq chunk-hashes)
-                           (hash-commit parent-commit-hash chunk-hashes))
-         commit-hash (or new-commit-hash parent-commit-hash)]
-     ;; Note: We no longer write [:edges :metadata] here - that was a global key
-     ;; that caused multi-branch conflicts. Per-branch state is stored in snapshots
-     ;; by persistence/sync!
+       ;; Compute commit hash if we have new chunk hashes
+       (let [new-commit-hash (when (seq chunk-hashes)
+                               (hash-commit parent-commit-hash chunk-hashes))
+             commit-hash (or new-commit-hash parent-commit-hash)]
+         ;; Note: We no longer write [:edges :metadata] here - that was a global key
+         ;; that caused multi-branch conflicts. Per-branch state is stored in snapshots
+         ;; by persistence/sync!
 
-     ;; Optionally convert chunks to soft references for memory reclamation
-     (when softify?
-       (doseq [pos (keys new-addresses)]
-         (.softifyChunk pes pos)))
+         ;; Optionally convert chunks to soft references for memory reclamation
+         (when softify?
+           (doseq [pos (keys new-addresses)]
+             (.softifyChunk pes pos)))
 
-     ;; Clear dirty set after successful sync
-     (.clearDirty pes)
+         ;; Clear dirty set after successful sync
+         (.clearDirty pes)
 
-     {:address-map address-map
-      :commit-hash commit-hash})))
+         {:address-map address-map
+          :commit-hash commit-hash})
+       (catch Exception e
+         (throw e))))))
 
 (defn flush-dirty-chunks!
   "Persist all dirty chunks to Konserve store (blocking).

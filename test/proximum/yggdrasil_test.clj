@@ -1,6 +1,7 @@
 (ns proximum.yggdrasil-test
   "Yggdrasil compliance tests for proximum adapter."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
+            [clojure.core.async :as a]
             [proximum.yggdrasil :as py :refer [->ProximumSystem]]
             [proximum.protocols :as p]
             [proximum.api-impl :as api]
@@ -56,7 +57,7 @@
 
    :commit
    (fn [sys msg]
-     (let [idx (p/sync! (:idx sys) {:message msg})]
+     (let [idx (a/<!! (p/sync! (:idx sys) {:message msg}))]
        (->ProximumSystem idx (:mmap-dir sys) (:system-name sys))))
 
    :close!

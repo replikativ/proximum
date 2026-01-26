@@ -11,6 +11,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.Function;
 
 /**
  * ProximumVectorStore - Persistent Vector Store with versioning support.
@@ -490,16 +492,15 @@ public class ProximumVectorStore implements AutoCloseable {
 
     /**
      * Persist current state to durable storage, creating a commit.
-     * Waits for all pending writes to complete.
+     * Returns channel that delivers updated index when all pending writes complete.
      * 
-     * With {:sync? true}, blocks until complete.
-     * Default returns channel that delivers index when done.
+     * In Clojure: use <! in go-block or <!! to block.
+     * In Java: returns CompletableFuture<ProximumVectorStore>.
      */
-    public synchronized ProximumVectorStore sync() {
+    public CompletableFuture<ProximumVectorStore> sync() {
         ensureInitialized();
-        Object newIdx = syncFn.invoke(clojureIndex);
-        this.clojureIndex = newIdx;
-        return this;
+        Object channel = syncFn.invoke(clojureIndex);
+        return channelToCompletableFuture(channel, result -> { this.clojureIndex = result; return this; });
     }
 
     /**
@@ -562,11 +563,13 @@ public class ProximumVectorStore implements AutoCloseable {
 
     /**
      * Garbage collect unreachable data from storage.
+     * Returns channel that delivers set of deleted keys when GC completes.
      * Removes commits older than remove-before date.
      */
-    public Set<Object> gc() {
+    public CompletableFuture<Set<Object>> gc() {
         ensureInitialized();
-        return (Set<Object>) gcFn.invoke(clojureIndex);
+        Object channel = gcFn.invoke(clojureIndex);
+        return channelToCompletableFuture(channel, result -> (Set<Object>) result);
     }
 
     /**
@@ -581,10 +584,20 @@ public class ProximumVectorStore implements AutoCloseable {
 
     /**
      * Close the index and release resources (mmap, caches, stores).
+     * Returns channel that delivers nil when cleanup completes.
+     * Clojure: can ignore return value (fire-and-forget).
+     * Java: close() blocks until cleanup is complete.
      */
     public void close() {
         ensureInitialized();
-        closeFn.invoke(clojureIndex);
+        try {
+            Object channel = closeFn.invoke(clojureIndex);
+            // Block until cleanup completes
+            IFn takeFn = Clojure.var("clojure.core.async", "<!!");
+            takeFn.invoke(channel);
+        } catch (Exception e) {
+            throw new RuntimeException("Close failed", e);
+        }
     }
 
     /**
@@ -622,13 +635,12 @@ public class ProximumVectorStore implements AutoCloseable {
     }
 
     /**
-     * Finish online compaction and return new index.
+     * Finish online compaction and return new index (async).
      */
-    public synchronized ProximumVectorStore finishOnlineCompaction(Object arg0) {
+    public CompletableFuture<ProximumVectorStore> finishOnlineCompaction(Object arg0) {
         ensureInitialized();
-        Object newIdx = finishOnlineCompactionFn.invoke(clojureIndex, convertFilterArg(arg0));
-        this.clojureIndex = newIdx;
-        return this;
+        Object channel = finishOnlineCompactionFn.invoke(clojureIndex, convertFilterArg(arg0));
+        return channelToCompletableFuture(channel, result -> { this.clojureIndex = result; return this; });
     }
 
     /**
@@ -904,16 +916,15 @@ public class ProximumVectorStore implements AutoCloseable {
 
     /**
      * Persist current state to durable storage, creating a commit.
-     * Waits for all pending writes to complete.
+     * Returns channel that delivers updated index when all pending writes complete.
      * 
-     * With {:sync? true}, blocks until complete.
-     * Default returns channel that delivers index when done.
+     * In Clojure: use <! in go-block or <!! to block.
+     * In Java: returns CompletableFuture<ProximumVectorStore>.
      */
-    public synchronized ProximumVectorStore sync(Map<String, Object> opts) {
+    public CompletableFuture<ProximumVectorStore> sync(Map<String, Object> opts) {
         ensureInitialized();
-        Object newIdx = syncFn.invoke(clojureIndex, toClojureMap(opts));
-        this.clojureIndex = newIdx;
-        return this;
+        Object channel = syncFn.invoke(clojureIndex, toClojureMap(opts));
+        return channelToCompletableFuture(channel, result -> { this.clojureIndex = result; return this; });
     }
 
     /**
@@ -945,11 +956,13 @@ public class ProximumVectorStore implements AutoCloseable {
 
     /**
      * Garbage collect unreachable data from storage.
+     * Returns channel that delivers set of deleted keys when GC completes.
      * Removes commits older than remove-before date.
      */
-    public Set<Object> gc(Object arg0, Map<String, Object> opts) {
+    public CompletableFuture<Set<Object>> gc(Object arg0, Map<String, Object> opts) {
         ensureInitialized();
-        return (Set<Object>) gcFn.invoke(clojureIndex, convertFilterArg(arg0), toClojureMap(opts));
+        Object channel = gcFn.invoke(clojureIndex, convertFilterArg(arg0), toClojureMap(opts));
+        return channelToCompletableFuture(channel, result -> (Set<Object>) result);
     }
 
     /**
@@ -1281,22 +1294,33 @@ public class ProximumVectorStore implements AutoCloseable {
         return result;
     }
 
+    /**
+     * Convert core.async channel to CompletableFuture.
+     * Blocks on a background thread to avoid blocking the caller.
+     *
+     * @param channel the core.async channel
+     * @param converter function to convert the channel result to the desired Java type
+     * @return CompletableFuture that completes when the channel delivers a value
+     */
+    @SuppressWarnings("unchecked")
+    private static <T> CompletableFuture<T> channelToCompletableFuture(
+            Object channel,
+            Function<Object, T> converter) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                // Block on background thread, not caller thread
+                IFn takeFn = Clojure.var("clojure.core.async", "<!!");
+                Object result = takeFn.invoke(channel);
+                return converter.apply(result);
+            } catch (Exception e) {
+                throw new RuntimeException("Async operation failed", e);
+            }
+        });
+    }
+
     // ==========================================================================
     // Mutable Convenience Methods
     // ==========================================================================
-
-    /**
-     * Persist current state to durable storage with a commit message.
-     *
-     * @param message the commit message
-     * @return this store instance
-     */
-    public synchronized ProximumVectorStore sync(String message) {
-        ensureInitialized();
-        Object newIdx = syncFn.invoke(clojureIndex, toClojureMap(java.util.Map.of("message", message)));
-        this.clojureIndex = newIdx;
-        return this;
-    }
 
     /**
      * Add a vector with auto-generated ID and return the ID (mutable convenience method).

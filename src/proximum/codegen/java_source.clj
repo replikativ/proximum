@@ -80,6 +80,11 @@
     (symbol? schema)
     (get malli->java-type (keyword schema) "Object")
 
+    ;; Async/Channel wrapper - maps to CompletableFuture
+    (and (sequential? schema) (= :async (first schema)))
+    (let [inner-type (schema-to-java-type (second schema))]
+      (str "CompletableFuture<" (box-type inner-type) ">"))
+
     ;; Vector/sequential with element type
     (and (sequential? schema)
          (#{:sequential :vector} (first schema)))
@@ -127,6 +132,19 @@
   [x]
   (or (= x :VectorIndex)
       (= x 'VectorIndex)))
+
+(defn- async-schema?
+  "Check if a schema is wrapped in [:async ...]."
+  [schema]
+  (and (sequential? schema)
+       (= :async (first schema))))
+
+(defn- unwrap-async
+  "Unwrap [:async T] to get T. Returns schema unchanged if not async."
+  [schema]
+  (if (async-schema? schema)
+    (second schema)
+    schema))
 
 (defn- schema-element-name
   "Get the name/type of a schema element for naming purposes."
@@ -212,15 +230,28 @@
   (let [method-name (java/java-method-name op-key)
         static? (java/static-operation? op-key)
         params (extract-java-params (:args entry))
-        return-type (if (returns-index? entry)
-                      "ProximumVectorStore"
-                      (schema-to-java-type (:ret entry)))
+        ret-schema (:ret entry)
+        async? (async-schema? ret-schema)
+        unwrapped-ret (unwrap-async ret-schema)
+        ;; Special case: close! is async in Clojure but blocks in Java (AutoCloseable)
+        close-special? (= op-key 'close!)
+        ;; Use unwrapped type for returns-index? check
+        base-return-type (if (returns-index? {:ret unwrapped-ret})
+                           "ProximumVectorStore"
+                           (schema-to-java-type unwrapped-ret))
+        ;; Full return type is wrapped in CompletableFuture if async (except close!)
+        return-type (if (and async? (not close-special?))
+                      (str "CompletableFuture<" base-return-type ">")
+                      base-return-type)
         param-str (str/join ", "
                             (map #(str (:type %) " " (:name %))
                                  (remove :optional? params)))]
     {:method-name method-name
      :static? static?
      :return-type return-type
+     :base-return-type base-return-type  ; Track unwrapped type
+     :async? (and async? (not close-special?))  ; close! is not treated as async in Java
+     :close-special? close-special?  ; Mark close! for special handling
      :params params
      :param-str param-str
      :doc (:doc entry)
@@ -271,19 +302,73 @@
     ;; No conversion needed
     :else param-name))
 
-(defn- generate-method-body
-  "Generate method body that delegates to Clojure function."
-  [{:keys [method-name static? return-type params op-key include-optional?]}]
+(defn- generate-result-converter
+  "Generate lambda expression to convert channel result to Java type."
+  [base-return-type static?]
+  (cond
+    (= base-return-type "ProximumVectorStore")
+    (if static?
+      "result -> new ProximumVectorStore(result, null)"
+      "result -> { this.clojureIndex = result; return this; }")
+
+    (= base-return-type "int")
+    "result -> ((Number) result).intValue()"
+
+    (= base-return-type "long")
+    "result -> ((Number) result).longValue()"
+
+    (= base-return-type "double")
+    "result -> ((Number) result).doubleValue()"
+
+    (= base-return-type "List<SearchResult>")
+    "result -> toSearchResults((Iterable<Object>) result)"
+
+    (= base-return-type "String")
+    "result -> (result instanceof clojure.lang.Keyword) ? ((clojure.lang.Keyword) result).getName() : (String) result"
+
+    (= base-return-type "Map<String, Object>")
+    "result -> result == null ? null : convertClojureMap((Map<Object, Object>) result)"
+
+    (= base-return-type "List<Map<String, Object>>")
+    "result -> convertClojureSeqToMapList(result)"
+
+    (= base-return-type "Set<String>")
+    "result -> convertKeywordSetToStrings((Set<Object>) result)"
+
+    (str/starts-with? base-return-type "Set<")
+    (str "result -> (Set<Object>) result")
+
+    :else
+    (str "result -> (" base-return-type ") result")))
+
+(defn- generate-async-method-body
+  "Generate method body for async operations that return CompletableFuture."
+  [{:keys [base-return-type static? op-key params include-optional?]}]
   (let [java-var-name (op-key->java-var op-key)
-        ;; Use all params when include-optional? is set, otherwise only required
         required-params (if include-optional?
                           params
                           (remove :optional? params))
-        ;; Convert parameters that need type conversion
         param-exprs (map (fn [{:keys [name type]}]
                            (param-conversion name type))
                          required-params)
-        ;; Build the Clojure call
+        invoke-args (if static?
+                      param-exprs
+                      (cons "clojureIndex" param-exprs))
+        invoke-str (str/join ", " invoke-args)
+        converter (generate-result-converter base-return-type static?)]
+    (str "        Object channel = " java-var-name "Fn.invoke(" invoke-str ");\n"
+         "        return channelToCompletableFuture(channel, " converter ");\n")))
+
+(defn- generate-sync-method-body
+  "Generate method body for synchronous operations."
+  [{:keys [return-type static? op-key params include-optional?]}]
+  (let [java-var-name (op-key->java-var op-key)
+        required-params (if include-optional?
+                          params
+                          (remove :optional? params))
+        param-exprs (map (fn [{:keys [name type]}]
+                           (param-conversion name type))
+                         required-params)
         invoke-args (if static?
                       param-exprs
                       (cons "clojureIndex" param-exprs))
@@ -352,6 +437,27 @@
 
       :else
       (str "        return (" return-type ") " java-var-name "Fn.invoke(" invoke-str ");\n"))))
+
+(defn- generate-close-method-body
+  "Generate method body for close! that blocks on async cleanup."
+  [{:keys [op-key]}]
+  (let [java-var-name (op-key->java-var op-key)]
+    (str "        try {\n"
+         "            Object channel = " java-var-name "Fn.invoke(clojureIndex);\n"
+         "            // Block until cleanup completes\n"
+         "            IFn takeFn = Clojure.var(\"clojure.core.async\", \"<!!\");\n"
+         "            takeFn.invoke(channel);\n"
+         "        } catch (Exception e) {\n"
+         "            throw new RuntimeException(\"Close failed\", e);\n"
+         "        }\n")))
+
+(defn- generate-method-body
+  "Generate method body that delegates to Clojure function."
+  [{:keys [async? close-special?] :as method-info}]
+  (cond
+    close-special? (generate-close-method-body method-info)
+    async? (generate-async-method-body method-info)
+    :else (generate-sync-method-body method-info)))
 
 (defn- generate-instance-method
   "Generate a complete instance method."
@@ -735,6 +841,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.Function;
 
 /**
  * ProximumVectorStore - Persistent Vector Store with versioning support.
@@ -1053,22 +1161,33 @@ public class ProximumVectorStore implements AutoCloseable {
         return result;
     }
 
+    /**
+     * Convert core.async channel to CompletableFuture.
+     * Blocks on a background thread to avoid blocking the caller.
+     *
+     * @param channel the core.async channel
+     * @param converter function to convert the channel result to the desired Java type
+     * @return CompletableFuture that completes when the channel delivers a value
+     */
+    @SuppressWarnings(\"unchecked\")
+    private static <T> CompletableFuture<T> channelToCompletableFuture(
+            Object channel,
+            Function<Object, T> converter) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                // Block on background thread, not caller thread
+                IFn takeFn = Clojure.var(\"clojure.core.async\", \"<!!\");
+                Object result = takeFn.invoke(channel);
+                return converter.apply(result);
+            } catch (Exception e) {
+                throw new RuntimeException(\"Async operation failed\", e);
+            }
+        });
+    }
+
     // ==========================================================================
     // Mutable Convenience Methods
     // ==========================================================================
-
-    /**
-     * Persist current state to durable storage with a commit message.
-     *
-     * @param message the commit message
-     * @return this store instance
-     */
-    public synchronized ProximumVectorStore sync(String message) {
-        ensureInitialized();
-        Object newIdx = syncFn.invoke(clojureIndex, toClojureMap(java.util.Map.of(\"message\", message)));
-        this.clojureIndex = newIdx;
-        return this;
-    }
 
     /**
      * Add a vector with auto-generated ID and return the ID (mutable convenience method).

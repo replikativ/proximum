@@ -459,6 +459,10 @@
 
    After sync!, konserve is consistent with mmap state.
 
+   Returns:
+     Channel that delivers the VectorStore when sync completes.
+     Use <! in go-block or <!! to block.
+
    Options (for testing):
      :crash-point - Simulate crash at specific point:
        :after-flush-buffer    - After flushing write buffer
@@ -469,40 +473,40 @@
        :after-metadata-write  - After writing metadata to konserve"
   ([^VectorStore vs] (sync! vs nil))
   ([^VectorStore vs {:keys [crash-point]}]
-   ;; Lock to prevent concurrent appends during sync
-   (locking vs
-     (let [store (:store vs)
-           dim (:dim vs)
-           chunk-size (:chunk-size vs)
-           current-count @(:count-atom vs)
-           ^MappedByteBuffer mmap-buf (:mmap-buf vs)]
-       ;; 1. Flush partial chunk if any (async)
-       (flush-write-buffer-async! vs)
-       (when (= crash-point :after-flush-buffer) (throw-crash! crash-point))
+   ;; Lock to prevent concurrent appends during initial sync phase
+   ;; Capture channels and do sync operations under lock
+   (let [channels-to-wait (locking vs
+                            (let [store (:store vs)
+                                  dim (:dim vs)
+                                  chunk-size (:chunk-size vs)
+                                  current-count @(:count-atom vs)
+                                  ^MappedByteBuffer mmap-buf (:mmap-buf vs)]
+                              ;; 1. Flush partial chunk if any (async)
+                              (flush-write-buffer-async! vs)
+                              (when (= crash-point :after-flush-buffer) (throw-crash! crash-point))
 
-       ;; 2. Force mmap to disk
-       (.force mmap-buf)
-       (when (= crash-point :after-first-force) (throw-crash! crash-point))
+                              ;; 2. Force mmap to disk
+                              (.force mmap-buf)
+                              (when (= crash-point :after-first-force) (throw-crash! crash-point))
 
-       ;; 3. Update mmap header with current count
-       (update-header-count! mmap-buf current-count)
-       (when (= crash-point :after-header-update) (throw-crash! crash-point))
+                              ;; 3. Update mmap header with current count
+                              (update-header-count! mmap-buf current-count)
+                              (when (= crash-point :after-header-update) (throw-crash! crash-point))
 
-       ;; 4. Force mmap again (commits header)
-       (.force mmap-buf)
-       (when (= crash-point :after-second-force) (throw-crash! crash-point))
+                              ;; 4. Force mmap again (commits header)
+                              (.force mmap-buf)
+                              (when (= crash-point :after-second-force) (throw-crash! crash-point))
 
-       ;; 5. Wait for all pending konserve writes (atomic removal pattern)
-       ;; Capture channels first, then wait, then remove only what we waited on.
-       ;; This prevents losing channels added by concurrent append! calls.
-       (let [channels-to-wait @(:pending-writes vs)]
+                              ;; Capture channels to wait for (release lock before waiting)
+                              @(:pending-writes vs)))]
+     ;; 5. Wait for all pending konserve writes asynchronously
+     (a/go
+       (try
          (doseq [ch channels-to-wait]
-           (a/<!! ch))
+           (a/<! ch))
          (when (= crash-point :after-pending-writes) (throw-crash! crash-point))
 
          ;; 6. Compute commit hash (metadata is stored per-branch in snapshots now)
-         ;; Note: We no longer write :vectors/meta - that was a global key that
-         ;; caused multi-branch conflicts. Per-branch state is in snapshots.
          (let [crypto-hash? (:crypto-hash? vs)
                pending-hashes (when crypto-hash? @(:pending-chunk-hashes vs))
                parent-hash (when crypto-hash? @(:commit-hash vs))
@@ -518,8 +522,12 @@
          (when (= crash-point :after-metadata-write) (throw-crash! crash-point))
 
          ;; 7. Atomically remove only the channels we waited on
-         (swap! (:pending-writes vs) #(reduce disj % channels-to-wait)))))
-   vs))
+         (swap! (:pending-writes vs) #(reduce disj % channels-to-wait))
+
+         ;; Return the VectorStore
+         vs
+         (catch Exception e
+           (throw e)))))))
 
 (defn flush!
   "Flush any pending writes. Alias for sync! for backwards compatibility."
@@ -528,17 +536,22 @@
 
 (defn close!
   "Close the store and release resources.
-   Calls sync! first to ensure all writes are committed."
+   Calls sync! first to ensure all writes are committed.
+   Returns a channel that delivers nil when cleanup is complete.
+   Clojure callers can ignore the channel (fire-and-forget).
+   Java close() blocks on the channel for proper resource cleanup."
   [^VectorStore vs]
-  (sync! vs)
-  ;; Clean up temp file (only if it's a temp file, not user-provided)
-  (let [mmap-path (:mmap-path vs)
-        temp-dir (System/getProperty "java.io.tmpdir")]
-    (when (.startsWith ^String mmap-path temp-dir)
-      (let [f (File. ^String mmap-path)]
-        (when (.exists f)
-          (.delete f)))))
-  nil)
+  ;; Fire sync and cleanup asynchronously
+  (a/go
+    (a/<! (sync! vs))
+    ;; Clean up temp file (only if it's a temp file, not user-provided)
+    (let [mmap-path (:mmap-path vs)
+          temp-dir (System/getProperty "java.io.tmpdir")]
+      (when (.startsWith ^String mmap-path temp-dir)
+        (let [f (File. ^String mmap-path)]
+          (when (.exists f)
+            (.delete f)))))
+    nil))
 
 (defn get-segment
   "Get the MemorySegment for direct SIMD access."

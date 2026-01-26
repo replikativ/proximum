@@ -7,6 +7,7 @@
    - Corruption detection
    - Edge cases and error handling"
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
+            [clojure.core.async :as a]
             [proximum.core :as core]
             [proximum.crypto :as crypto]
             [proximum.protocols :as p])
@@ -84,8 +85,8 @@
                 idx2-v2 (core/insert idx2-v1 v2 :b)]
 
             ;; Sync both to compute commit hashes
-            (let [idx1-synced (p/sync! idx1-v2)
-                  idx2-synced (p/sync! idx2-v2)
+            (let [idx1-synced (a/<!! (p/sync! idx1-v2))
+                  idx2-synced (a/<!! (p/sync! idx2-v2))
                   hash1 (crypto/get-commit-hash idx1-synced)
                   hash2 (crypto/get-commit-hash idx2-synced)]
 
@@ -125,8 +126,8 @@
                 idx1-v1 (core/insert idx1 v1 :a)
                 idx2-v1 (core/insert idx2 v2 :a)]
 
-            (let [idx1-synced (p/sync! idx1-v1)
-                  idx2-synced (p/sync! idx2-v1)
+            (let [idx1-synced (a/<!! (p/sync! idx1-v1))
+                  idx2-synced (a/<!! (p/sync! idx2-v1))
                   hash1 (crypto/get-commit-hash idx1-synced)
                   hash2 (crypto/get-commit-hash idx2-synced)]
 
@@ -153,12 +154,12 @@
 
           ;; First commit
           (let [idx1 (core/insert idx (float-array [1.0 2.0 3.0 4.0]) :a)
-                idx1-synced (p/sync! idx1)
+                idx1-synced (a/<!! (p/sync! idx1))
                 hash1 (crypto/get-commit-hash idx1-synced)]
 
             ;; Second commit with same data
             (let [idx2 (core/insert idx1-synced (float-array [5.0 6.0 7.0 8.0]) :b)
-                  idx2-synced (p/sync! idx2)
+                  idx2-synced (a/<!! (p/sync! idx2))
                   hash2 (crypto/get-commit-hash idx2-synced)]
 
               (is (some? hash1))
@@ -190,7 +191,7 @@
                                                    (keyword (str "v" i))))
                                     idx
                                     (range 10))
-              idx-synced (p/sync! idx-with-data)]
+              idx-synced (a/<!! (p/sync! idx-with-data))]
 
           ;; Close to release mmap (simulate cold start)
           (p/close! idx-synced)
@@ -216,7 +217,7 @@
                                       :crypto-hash? true
                                       :store-config (file-store-config (:store-path layout))
                                       :mmap-dir (:mmap-dir layout)})
-              idx-synced (p/sync! idx)]
+              idx-synced (a/<!! (p/sync! idx))]
 
           (p/close! idx-synced)
 
@@ -239,7 +240,7 @@
                                       :store-config (file-store-config (:store-path layout))
                                       :mmap-dir (:mmap-dir layout)})
               idx-with-data (core/insert idx (float-array [1.0 2.0 3.0 4.0]) :a)
-              idx-synced (p/sync! idx-with-data)]
+              idx-synced (a/<!! (p/sync! idx-with-data))]
 
           (p/close! idx-synced)
 
@@ -261,7 +262,7 @@
                                       :crypto-hash? true
                                       :store-config (file-store-config (:store-path layout))
                                       :mmap-dir (:mmap-dir layout)})
-              idx-synced (p/sync! idx)]
+              idx-synced (a/<!! (p/sync! idx))]
 
           (p/close! idx-synced)
 
@@ -343,7 +344,7 @@
                                       :crypto-hash? true
                                       :store-config (file-store-config (:store-path layout))
                                       :mmap-dir (:mmap-dir layout)})
-              idx-synced (p/sync! idx)
+              idx-synced (a/<!! (p/sync! idx))
               hash (crypto/get-commit-hash idx-synced)]
 
           (is (some? hash))

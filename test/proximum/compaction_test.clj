@@ -2,6 +2,7 @@
   "Tests for online and offline compaction operations."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [clojure.string :as str]
+            [clojure.core.async :as a]
             [proximum.core :as core]
             [proximum.protocols :as p])
   (:import [java.io File]))
@@ -130,7 +131,7 @@
             (is (contains? progress :mapped-ids)))
 
           ;; Finish compaction
-          (let [compacted (core/finish-online-compaction! state)]
+          (let [compacted (a/<!! (core/finish-online-compaction! state))]
             (is (= 17 (core/count-vectors compacted)))
 
             (let [metrics (core/index-metrics compacted)]
@@ -182,7 +183,7 @@
             (is (= 3 (:delta-count progress))))
 
           ;; Finish compaction - deltas should be applied
-          (let [compacted (core/finish-online-compaction! state3)
+          (let [compacted (a/<!! (core/finish-online-compaction! state3))
                 metrics (core/index-metrics compacted)]
             (is (= 11 (core/count-vectors compacted)))
             (is (= 11 (:live-count metrics)))
@@ -490,7 +491,7 @@
           @delete-future
 
           ;; Finish compaction
-          (let [compacted (core/finish-online-compaction! @state-atom)
+          (let [compacted (a/<!! (core/finish-online-compaction! @state-atom))
                 metrics (core/index-metrics compacted)]
 
             ;; Original: 100 vectors, deleted 10 (0,10,20,30,40,50,60,70,80,90)
@@ -541,7 +542,7 @@
           (is (= 17 (core/count-vectors state2)))
 
           ;; Finish compaction
-          (let [compacted (core/finish-online-compaction! state2)
+          (let [compacted (a/<!! (core/finish-online-compaction! state2))
                 metrics (core/index-metrics compacted)]
 
             ;; Live count should be 17
@@ -585,7 +586,7 @@
               state1 (core/insert state0 (random-vec 32) "a")
               state2 (core/insert state1 (random-vec 32) "b")
               state3 (core/delete state2 5)
-              state4 (core/flush! state3)]
+              state4 (a/<!! (core/flush! state3))]
 
           ;; Each state should have correct counts
           (is (= 10 (core/count-vectors state0)))
@@ -676,8 +677,8 @@
               "Source vector counts should match")
 
           ;; Finish both compactions
-          (let [compacted-a (core/finish-online-compaction! state-a)
-                compacted-b (core/finish-online-compaction! state-b)]
+          (let [compacted-a (a/<!! (core/finish-online-compaction! state-a))
+                compacted-b (a/<!! (core/finish-online-compaction! state-b))]
 
             ;; Same live count
             (is (= (:live-count (core/index-metrics compacted-a))
@@ -787,7 +788,7 @@
           (is (= 3 (:original-n (core/get-metadata state2 3))))
 
           ;; Finish compaction
-          (let [compacted (core/finish-online-compaction! state2)]
+          (let [compacted (a/<!! (core/finish-online-compaction! state2))]
 
             ;; In the compacted index, vectors are re-indexed (0-9 map to 0-9 for undeleted)
             ;; The id-mapping from copy should be {0->0, 1->1, ..., 9->9}
