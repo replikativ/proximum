@@ -411,4 +411,4 @@ Documents require an `id` field when using the Spring AI Document API:
 
 ## License
 
-EPL-2.0
+Apache-2.0

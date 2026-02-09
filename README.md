@@ -330,7 +330,7 @@ Browse working examples in [`examples/`](examples/):
 
 ## License
 
-EPL-2.0 (Eclipse Public License 2.0) - see [LICENSE](LICENSE)
+Apache-2.0 (Apache License, Version 2.0) - see [LICENSE](LICENSE)
 
 ---
 
@@ -340,7 +340,7 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for:
 - Code of conduct
 - Development workflow
 - Testing requirements
-- Licensing (DCO/EPL-2.0)
+- Licensing (DCO/Apache-2.0)
 
 ---
 
