@@ -282,14 +282,14 @@
             (println-stderr (apply str (repeat 71 "-")))
             (doseq [r results]
               (let [insert-str (format "%.0f±%.0f"
-                                      (double (:insert_throughput r))
-                                      (double (get r :insert_throughput_stddev 0)))
+                                      (double (or (:insert_throughput r) 0))
+                                      (double (or (:insert_throughput_stddev r) 0)))
                     qps-str (format "%.0f±%.0f"
-                                   (double (:search_qps r))
-                                   (double (get r :search_qps_stddev 0)))]
+                                   (double (or (:search_qps r) 0))
+                                   (double (or (:search_qps_stddev r) 0)))]
                 (println-stderr (format "%-25s %-18s %-18s %.2f%%"
                                        (:library r) insert-str qps-str
-                                       (double (* 100 (:recall_at_k r))))))))
+                                       (double (* 100 (or (:recall_at_k r) 0))))))))
           (do
             (println-stderr (format "\n%-25s %-15s %-12s %-10s %-10s %-10s"
                                    "Library" "Insert (vec/s)" "Search QPS" "p50 (us)" "p99 (us)" "Recall@10"))
@@ -297,11 +297,11 @@
             (doseq [r results]
               (println-stderr (format "%-25s %-15.0f %-12.0f %-10.1f %-10.1f %.2f%%"
                                      (:library r)
-                                     (double (:insert_throughput r))
-                                     (double (:search_qps r))
-                                     (double (:search_latency_p50_us r))
-                                     (double (:search_latency_p99_us r))
-                                     (double (* 100 (:recall_at_k r))))))))))))
+                                     (double (or (:insert_throughput r) 0))
+                                     (double (or (:search_qps r) 0))
+                                     (double (or (:search_latency_p50_us r) 0))
+                                     (double (or (:search_latency_p99_us r) 0))
+                                     (double (* 100 (or (:recall_at_k r) 0))))))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; CLI
