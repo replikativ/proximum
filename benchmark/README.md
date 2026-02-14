@@ -4,7 +4,7 @@ Pure Clojure benchmark runner for HNSW implementations with minimal dependencies
 
 ## Quick Start
 
-**No Python needed for Proximum-only benchmarks:**
+**Datasets download automatically** - just run the benchmark:
 
 ```bash
 # Quick test (10k vectors, ~1 minute)
@@ -16,6 +16,8 @@ Pure Clojure benchmark runner for HNSW implementations with minimal dependencies
 # Multiple runs for variance measurement
 ./benchmark/run-bench.sh sift10k --runs 3
 ```
+
+**Note:** No Python needed for Proximum-only benchmarks. Python required for dataset download and optional hnswlib baseline.
 
 ## Benchmark Datasets
 
