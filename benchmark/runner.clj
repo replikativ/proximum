@@ -337,6 +337,11 @@
                        (= arg "--skip-download")
                        (recur (rest args) (assoc opts :skip-download true))
 
+                       ;; Positional argument - treat as dataset if no dataset set yet
+                       (and (not (str/starts-with? arg "--"))
+                            (not (:dataset opts)))
+                       (recur (rest args) (assoc opts :dataset (keyword arg)))
+
                        :else
                        (do
                          (println-stderr "Unknown option:" arg)
