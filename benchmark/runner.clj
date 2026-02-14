@@ -118,7 +118,7 @@
              (str "-J-Xmx" heap)
              "-J--add-modules=jdk.incubator.vector"
              "-J--enable-native-access=ALL-UNNAMED"
-             "-M:dev"
+             "-M:benchmark"
              "-m" bench-ns
              (name dataset-name)
              (str M)
@@ -296,11 +296,11 @@
             (doseq [r results]
               (println-stderr (format "%-25s %-15.0f %-12.0f %-10.1f %-10.1f %.2f%%"
                                      (:library r)
-                                     (:insert_throughput r)
-                                     (:search_qps r)
-                                     (:search_latency_p50_us r)
-                                     (:search_latency_p99_us r)
-                                     (* 100 (:recall_at_k r)))))))))))
+                                     (double (:insert_throughput r))
+                                     (double (:search_qps r))
+                                     (double (:search_latency_p50_us r))
+                                     (double (:search_latency_p99_us r))
+                                     (double (* 100 (:recall_at_k r))))))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; CLI
