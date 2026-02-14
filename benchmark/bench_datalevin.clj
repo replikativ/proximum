@@ -194,6 +194,12 @@
                  :recall_at_k mean-recall}))))
 
         (finally
+          ;; Important: close vector index BEFORE closing LMDB to prevent thread leak
+          (try
+            (d/close-vector-index vec-idx)
+            (catch Exception e
+              (binding [*out* *err*]
+                (println "Warning: failed to close vector index:" (.getMessage e)))))
           (d/close-kv lmdb)
           ;; Clean up
           (doseq [f (reverse (file-seq (File. db-path)))]
