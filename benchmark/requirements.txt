@@ -1,0 +1,12 @@
+# Benchmark dependencies for Python-based benchmarks
+# Install with: python3 -m venv benchmark-env && source benchmark-env/bin/activate && pip install -r benchmark/requirements.txt
+
+# Core
+numpy>=2.0.0
+h5py>=3.10.0  # For loading ann-benchmarks HDF5 datasets
+
+# HNSW reference implementation
+hnswlib>=0.8.0
+
+# Visualization (optional)
+matplotlib>=3.8.0
