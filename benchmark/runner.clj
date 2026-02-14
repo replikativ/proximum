@@ -111,7 +111,8 @@
 (defn run-clj-benchmark
   "Run a Clojure benchmark via clj command"
   [bench-ns dataset-name {:keys [M ef-construction ef-search threads warmup heap cosine?]
-                          :or {M 16 ef-construction 200 ef-search 100 threads 8 warmup 1
+                          :or {M 16 ef-construction 200 ef-search 100 threads 8
+                               warmup (if (str/includes? (name dataset-name) "1m") 1 2)
                                heap (if (str/includes? (name dataset-name) "1m") "8g" "4g")}}]
   (println-stderr (format "\n=== Running %s ===" bench-ns))
   (let [cmd ["clj"
