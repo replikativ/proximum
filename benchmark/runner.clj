@@ -282,14 +282,14 @@
             (println-stderr (apply str (repeat 71 "-")))
             (doseq [r results]
               (let [insert-str (format "%.0f±%.0f"
-                                      (:insert_throughput r)
-                                      (get r :insert_throughput_stddev 0))
+                                      (double (:insert_throughput r))
+                                      (double (get r :insert_throughput_stddev 0)))
                     qps-str (format "%.0f±%.0f"
-                                   (:search_qps r)
-                                   (get r :search_qps_stddev 0))]
+                                   (double (:search_qps r))
+                                   (double (get r :search_qps_stddev 0)))]
                 (println-stderr (format "%-25s %-18s %-18s %.2f%%"
                                        (:library r) insert-str qps-str
-                                       (* 100 (:recall_at_k r)))))))
+                                       (double (* 100 (:recall_at_k r))))))))
           (do
             (println-stderr (format "\n%-25s %-15s %-12s %-10s %-10s %-10s"
                                    "Library" "Insert (vec/s)" "Search QPS" "p50 (us)" "p99 (us)" "Recall@10"))
