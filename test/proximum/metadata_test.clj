@@ -9,7 +9,7 @@
    - Edge cases (nil, blank strings, number normalization)"
   (:require [clojure.test :refer [deftest is testing]]
             [proximum.metadata :as meta]
-            [me.tonsky.persistent-sorted-set :as pss])
+            [org.replikativ.persistent-sorted-set :as pss])
   (:import [java.util UUID]))
 
 ;; -----------------------------------------------------------------------------

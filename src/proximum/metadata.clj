@@ -6,7 +6,7 @@
    - External ID index: string-based external IDs mapped to internal node IDs
 
    Both use PersistentSortedSet for O(log n) operations with structural sharing."
-  (:require [me.tonsky.persistent-sorted-set :as pss]
+  (:require [org.replikativ.persistent-sorted-set :as pss]
             [clojure.string :as str]))
 
 ;; -----------------------------------------------------------------------------

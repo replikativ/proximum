@@ -16,9 +16,9 @@
             [konserve.utils :as k-utils]
             [konserve.serializers :refer [fressian-serializer]]
             [hasch.core :as hasch]
-            [me.tonsky.persistent-sorted-set :as pss])
+            [org.replikativ.persistent-sorted-set :as pss])
   (:import [org.fressian.handlers WriteHandler ReadHandler]
-           [me.tonsky.persistent_sorted_set IStorage Leaf Branch ANode Settings PersistentSortedSet]
+           [org.replikativ.persistent_sorted_set IStorage Leaf Branch ANode Settings PersistentSortedSet]
            [java.util List UUID]))
 
 ;;; Address Generation

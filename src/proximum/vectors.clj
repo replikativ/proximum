@@ -98,6 +98,7 @@
             mmap-path      ;; path to mmap file (user-provided or temp)
             mmap-buf       ;; MappedByteBuffer
             mem-segment    ;; MemorySegment for SIMD
+            arena          ;; Arena for MemorySegment lifecycle (ofShared for proper cleanup)
             capacity       ;; current mmap capacity
    ;; Crypto-hash fields (for auditability / merkle)
             crypto-hash?        ;; boolean: enable content-based hashing
@@ -184,38 +185,46 @@
 
 (defn- create-mmap-file
   "Create and map a new mmap file for vectors.
-   Writes header with initial count=0."
+   Writes header with initial count=0.
+   Uses Arena.ofShared() for proper resource lifecycle - arena must be closed explicitly."
   [^String path ^long dim ^long chunk-size ^long capacity]
   (let [file (File. path)
         file-size (+ HEADER-SIZE (* capacity dim 4))
         raf (RandomAccessFile. file "rw")
         _ (.setLength raf file-size)
         channel (.getChannel raf)
+        ;; Use ofShared() instead of global() for explicit lifecycle management
+        arena (Arena/ofShared)
         mmap-buf (.map channel FileChannel$MapMode/READ_WRITE 0 file-size)
-        mem-seg (.map channel FileChannel$MapMode/READ_WRITE 0 file-size (Arena/global))]
+        mem-seg (.map channel FileChannel$MapMode/READ_WRITE 0 file-size arena)]
     (.order mmap-buf ByteOrder/LITTLE_ENDIAN)
     (.close raf)
     ;; Write initial header
     (write-header! mmap-buf 0 dim chunk-size)
     {:mmap-buf mmap-buf
      :mem-segment mem-seg
+     :arena arena
      :capacity capacity}))
 
 (defn- open-existing-mmap
-  "Open an existing mmap file. Returns nil if file doesn't exist or invalid header."
+  "Open an existing mmap file. Returns nil if file doesn't exist or invalid header.
+   Uses Arena.ofShared() for proper resource lifecycle - arena must be closed explicitly."
   [^String path]
   (let [file (File. path)]
     (when (.exists file)
       (let [raf (RandomAccessFile. file "rw")
             file-size (.length raf)
             channel (.getChannel raf)
+            ;; Use ofShared() instead of global() for explicit lifecycle management
+            arena (Arena/ofShared)
             mmap-buf (.map channel FileChannel$MapMode/READ_WRITE 0 file-size)
-            mem-seg (.map channel FileChannel$MapMode/READ_WRITE 0 file-size (Arena/global))]
+            mem-seg (.map channel FileChannel$MapMode/READ_WRITE 0 file-size arena)]
         (.order mmap-buf ByteOrder/LITTLE_ENDIAN)
         (.close raf)
         (when-let [header (read-header mmap-buf)]
           {:mmap-buf mmap-buf
            :mem-segment mem-seg
+           :arena arena
            :header header
            :capacity (quot (- file-size HEADER-SIZE) (* (:dim header) 4))})))))
 
@@ -256,7 +265,7 @@
   (let [actual-mmap-path (or mmap-path
                              (str (System/getProperty "java.io.tmpdir")
                                   "/vectors-" (java.util.UUID/randomUUID) ".mmap"))
-        {:keys [mmap-buf mem-segment]} (create-mmap-file actual-mmap-path dim chunk-size capacity)]
+        {:keys [mmap-buf mem-segment arena]} (create-mmap-file actual-mmap-path dim chunk-size capacity)]
     (->VectorStore
      store
      dim
@@ -267,6 +276,7 @@
      actual-mmap-path
      mmap-buf
      mem-segment
+     arena
      capacity
      crypto-hash?
      (when crypto-hash? (atom nil))   ;; commit-hash
@@ -293,7 +303,7 @@
         actual-mmap-path (or mmap-path
                              (str (System/getProperty "java.io.tmpdir")
                                   "/vectors-" (System/currentTimeMillis) ".mmap"))
-        {:keys [mmap-buf mem-segment capacity]}
+        {:keys [mmap-buf mem-segment arena capacity]}
         (if (and mmap-compatible? (>= (:capacity existing-mmap) required-capacity))
           existing-mmap
           (create-mmap-file actual-mmap-path dim chunk-size required-capacity))
@@ -320,6 +330,7 @@
      actual-mmap-path
      mmap-buf
      mem-segment
+     arena
      capacity
      crypto-hash?
      (when crypto-hash? (atom commit-hash))
@@ -537,6 +548,7 @@
 (defn close!
   "Close the store and release resources.
    Calls sync! first to ensure all writes are committed.
+   Closes the Arena to unmap MemorySegment and release file mapping.
    Returns a channel that delivers nil when cleanup is complete.
    Clojure callers can ignore the channel (fire-and-forget).
    Java close() blocks on the channel for proper resource cleanup."
@@ -544,6 +556,9 @@
   ;; Fire sync and cleanup asynchronously
   (a/go
     (a/<! (sync! vs))
+    ;; Close arena to unmap MemorySegment (must be done before deleting file)
+    (when-let [arena (:arena vs)]
+      (.close arena))
     ;; Clean up temp file (only if it's a temp file, not user-provided)
     (let [mmap-path (:mmap-path vs)
           temp-dir (System/getProperty "java.io.tmpdir")]
