@@ -235,7 +235,7 @@
 ;; Main runner
 
 (defn run-suite [dataset-name {:keys [runs only skip-download]
-                                :or {runs 1}
+                                :or {runs (if (str/includes? (name dataset-name) "1m") 3 1)}
                                 :as opts}]
   (println-stderr (apply str (repeat 60 "=")))
   (println-stderr "HNSW Benchmark Suite")
