@@ -11,7 +11,7 @@
    B. Chunked: PHM of chunks, each chunk holds N nodes
    C. PSS: Current persistent-sorted-set approach"
   (:require [clojure.core :as c]
-            [me.tonsky.persistent-sorted-set :as pss]
+            [org.replikativ.persistent-sorted-set :as pss]
             [criterium.core :as crit])
   (:import [java.util Random]))
 

@@ -16,7 +16,7 @@
             [proximum.edges :as edges]
             [proximum.crypto :as crypto]
             [proximum.logging :as log]
-            [me.tonsky.persistent-sorted-set :as pss]
+            [org.replikativ.persistent-sorted-set :as pss]
             [konserve.core :as k]
             [clojure.core.async :as a]))
 

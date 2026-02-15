@@ -17,7 +17,7 @@
    - Unreachable PSS nodes"
   (:require [konserve.core :as k]
             [konserve.gc :as k-gc]
-            [me.tonsky.persistent-sorted-set :as pss]
+            [org.replikativ.persistent-sorted-set :as pss]
             [clojure.set :as set]
             [proximum.protocols :as p]
             [proximum.storage :as storage])

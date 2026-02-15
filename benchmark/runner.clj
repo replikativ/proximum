@@ -119,6 +119,7 @@
              (str "-J-Xmx" heap)
              "-J--add-modules=jdk.incubator.vector"
              "-J--enable-native-access=ALL-UNNAMED"
+             (str "-J-Dproximum.physical_cores=" threads)
              "-M:benchmark"
              "-m" bench-ns
              (name dataset-name)
