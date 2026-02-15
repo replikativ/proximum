@@ -4,6 +4,7 @@
 # Core
 numpy>=2.0.0
 h5py>=3.10.0  # For loading ann-benchmarks HDF5 datasets
+datasets>=2.14.0  # For loading HuggingFace datasets (DBpedia-OpenAI)
 
 # HNSW reference implementation
 hnswlib>=0.8.0
