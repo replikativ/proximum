@@ -115,11 +115,12 @@
       (println (format "  Queries: %d" n-queries)))
 
     ;; Create LMDB and vector index
-    (let [lmdb (d/open-kv db-path)]
+    (let [lmdb (d/open-kv db-path)
+          vec-idx (atom nil)]
       (try
         (binding [*out* *err*]
           (println "\nCreating vector index..."))
-        (let [vec-idx (d/new-vector-index
+        (let [idx (d/new-vector-index
                         lmdb
                         {:domain "bench"
                          :dimensions dim
@@ -127,14 +128,15 @@
                          :quantization :float
                          :connectivity M
                          :expansion-add ef-construction
-                         :expansion-search ef-search})]
+                         :expansion-search ef-search})
+              _ (reset! vec-idx idx)]
 
           ;; Benchmark insertion
           (binding [*out* *err*]
             (println "Benchmarking insertion..."))
           (let [start (System/nanoTime)
                 _ (doseq [[i v] (map-indexed vector vectors)]
-                    (d/add-vec vec-idx i v))
+                    (d/add-vec idx i v))
                 insert-time (/ (- (System/nanoTime) start) 1e9)]
 
             (binding [*out* *err*]
@@ -143,7 +145,7 @@
 
             ;; Warmup
             (dotimes [_ 10]
-              (d/search-vec vec-idx (first query-vecs) k))
+              (d/search-vec idx (first query-vecs) k))
 
             ;; Benchmark search
             (binding [*out* *err*]
@@ -152,7 +154,7 @@
                   latencies (doall
                               (for [q query-vecs]
                                 (let [start (System/nanoTime)
-                                      results (d/search-vec vec-idx q k)
+                                      results (d/search-vec idx q k)
                                       elapsed (- (System/nanoTime) start)]
                                   (swap! search-results conj results)
                                   elapsed)))
@@ -196,7 +198,8 @@
         (finally
           ;; Important: close vector index BEFORE closing LMDB to prevent thread leak
           (try
-            (d/close-vector-index vec-idx)
+            (when-let [idx @vec-idx]
+              (d/close-vector-index idx))
             (catch Exception e
               (binding [*out* *err*]
                 (println "Warning: failed to close vector index:" (.getMessage e)))))
