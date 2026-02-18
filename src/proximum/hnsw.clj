@@ -1203,7 +1203,7 @@
                       :crypto-hash? crypto-hash?}
                      {:sync? true}))
         _ (when base-store
-            (k/assoc base-store :branches #{branch} {:sync? true}))
+            (k/update base-store :branches #(conj (or % #{}) branch) {:sync? true}))
         pss-store (storage/create-storage base-store {:cache-size cache-size
                                                       :crypto-hash? crypto-hash?})
         meta-pss (meta/create-metadata-pss pss-store)
