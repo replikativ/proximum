@@ -111,7 +111,7 @@
     ;; Write new branch snapshot under both commit-id and branch name
     (k/assoc edge-store new-commit-id new-snapshot {:sync? true})
     (k/assoc edge-store new-branch new-snapshot {:sync? true})
-    (k/assoc edge-store :branches (conj existing-branches new-branch) {:sync? true})
+    (k/update edge-store :branches #(conj (or % #{}) new-branch) {:sync? true})
 
     ;; Assemble forked index using Forkable protocol
     (p/assemble-forked-index idx forked-vectors forked-graph new-branch new-commit-id)))
