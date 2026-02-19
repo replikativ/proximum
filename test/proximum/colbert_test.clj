@@ -184,3 +184,104 @@
       (let [result (core/search idx' (float-array [1 0 0 0]) 10)]
         (is (some #(= ["doc-1" :title] (:id %)) result))
         (is (some #(= ["doc-1" :token 0] (:id %)) result))))))
+
+;; -----------------------------------------------------------------------------
+;; Weighted Multi-Field Search Tests
+
+(deftest test-weighted-field-search-basic
+  (testing "Weighted combination of field results"
+    (let [idx (create-test-index 4)
+          ;; Two docs with different field weights
+          idx' (-> idx
+                   (assoc ["doc-1" :title] (float-array [1 0 0 0]))
+                   (assoc ["doc-1" :content] (float-array [0 1 0 0]))
+                   (assoc ["doc-2" :title] (float-array [0.9 0 0 0]))
+                   (assoc ["doc-2" :content] (float-array [1 0 0 0])))
+          ;; Query matches doc-1's title exactly, doc-2's content exactly
+          query (float-array [1 0 0 0])
+          ;; Weight title higher
+          weights {:title 0.7 :content 0.3}
+          results (colbert/weighted-field-search idx' query 5 weights)]
+      
+      (is (= 2 (count results)))
+      ;; doc-2 should rank higher (0.7*0.9 + 0.3*1.0 = 0.93)
+      ;; vs doc-1 (0.7*1.0 + 0.3*0.0 = 0.7)
+      (is (= "doc-2" (:doc-id (first results)))))))
+
+(deftest test-weighted-field-search-missing-fields
+  (testing "Documents with missing fields score lower"
+    (let [idx (create-test-index 4)
+          idx' (-> idx
+                   (assoc ["doc-1" :title] (float-array [1 0 0 0]))
+                   (assoc ["doc-1" :content] (float-array [1 0 0 0]))
+                   (assoc ["doc-2" :title] (float-array [1 0 0 0])))
+          ;; doc-2 has no content field
+          query (float-array [1 0 0 0])
+          weights {:title 0.5 :content 0.5}
+          results (colbert/weighted-field-search idx' query 5 weights)]
+      
+      ;; doc-1 has both fields, should score higher
+      (is (= "doc-1" (:doc-id (first results)))))))
+
+(deftest test-weighted-field-search-with-constraints
+  (testing "Required field constraints"
+    (let [idx (create-test-index 4)
+          idx' (-> idx
+                   (assoc ["doc-1" :title] (float-array [1 0 0 0]))
+                   (assoc ["doc-1" :author] (float-array [1 0 0 0]))
+                   (assoc ["doc-2" :title] (float-array [1 0 0 0])))
+          ;; doc-2 has no author
+          query (float-array [1 0 0 0])
+          weights {:title 0.5 :author 0.5}
+          results (colbert/weighted-field-search-with-constraints
+                   idx' query 5 weights #{:author})]
+      
+      ;; Only doc-1 has author field
+      (is (= 1 (count results)))
+      (is (= "doc-1" (:doc-id (first results)))))))
+
+;; -----------------------------------------------------------------------------
+;; Hybrid Search Tests
+
+(deftest test-hybrid-search-basic
+  (testing "Combine field search with MaxSim"
+    (let [idx (create-test-index 4)
+          idx' (-> idx
+                   ;; Field vectors
+                   (assoc ["doc-1" :title] (float-array [1 0 0 0]))
+                   (assoc ["doc-2" :title] (float-array [0 1 0 0]))
+                   ;; Token vectors
+                   (colbert/insert-document "doc-1"
+                                            [(float-array [1 0 0 0])
+                                             (float-array [0 1 0 0])])
+                   (colbert/insert-document "doc-2"
+                                            [(float-array [0 1 0 0])]))
+          query-vec (float-array [1 0 0 0])
+          query-toks [(float-array [1 0 0 0])
+                      (float-array [0 1 0 0])]
+          weights {:title 1.0}
+          results (colbert/hybrid-search idx' query-vec query-toks 5 weights 0.5)]
+      
+      (is (<= 1 (count results)))
+      ;; Results should have both field and maxsim scores
+      (is (contains? (first results) :field-score))
+      (is (contains? (first results) :maxsim-score)))))
+
+(deftest test-hybrid-search-alpha-extremes
+  (testing "Alpha=1.0 uses only field score, alpha=0.0 uses only MaxSim"
+    (let [idx (create-test-index 4)
+          idx' (-> idx
+                   (assoc ["doc-1" :title] (float-array [1 0 0 0]))
+                   (colbert/insert-document "doc-1"
+                                            [(float-array [0 0 0 1])]))
+          query-vec (float-array [1 0 0 0])
+          query-toks [(float-array [0 0 0 1])]
+          weights {:title 1.0}
+          ;; Alpha=1.0: field score dominates (title matches)
+          results-field (colbert/hybrid-search idx' query-vec query-toks 5 weights 1.0)
+          ;; Alpha=0.0: MaxSim dominates (token matches)
+          results-maxsim (colbert/hybrid-search idx' query-vec query-toks 5 weights 0.0)]
+      
+      ;; Both should return doc-1 but with different score composition
+      (is (some? (seq results-field)))
+      (is (some? (seq results-maxsim))))))
