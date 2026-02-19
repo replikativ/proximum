@@ -40,13 +40,13 @@
           (if (zero? c)
             (recur (next a-seq) (next b-seq))
             c))))
-    
+
     (and (coll? a) (not (coll? b))) -1
     (and (not (coll? a)) (coll? b)) 1
-    
+
     (and (= (type a) (type b)) (instance? Comparable a))
     (compare a b)
-    
+
     :else
     (let [c (compare (.getName (class a)) (.getName (class b)))]
       (if (zero? c)

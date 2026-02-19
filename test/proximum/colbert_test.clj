@@ -29,10 +29,10 @@
                   (float-array [0 1 0 0])
                   (float-array [0 0 1 0])]
           idx' (colbert/insert-document idx "doc-1" tokens)]
-      
+
       ;; Each token should be searchable
       (is (= 3 (core/count-vectors idx')))
-      
+
       ;; Tokens have compound keys
       (let [result (core/search idx' (float-array [1 0 0 0]) 3)]
         (is (= ["doc-1" :token 0] (:id (first result))))))))
@@ -45,9 +45,9 @@
                 ["doc-2" [(float-array [0 0 1 0])
                           (float-array [0 0 0 1])]]]
           idx' (colbert/insert-documents idx docs)]
-      
+
       (is (= 4 (core/count-vectors idx')))
-      
+
       ;; Search finds tokens from both docs
       (let [result (core/search idx' (float-array [0.5 0.5 0 0]) 10)]
         (is (some #(= ["doc-1" :token 0] (:id %)) result))
@@ -56,14 +56,14 @@
 (deftest test-document-tokens-with-compound-keys
   (testing "Token keys are compound [doc-id :token idx]"
     (let [idx (create-test-index 4)
-          idx' (colbert/insert-document idx "test-doc" 
-                                       [(float-array [1 0 0 0])
-                                        (float-array [0 1 0 0])])]
-      
+          idx' (colbert/insert-document idx "test-doc"
+                                        [(float-array [1 0 0 0])
+                                         (float-array [0 1 0 0])])]
+
       ;; First token: [doc-id :token 0]
       (is (= ["test-doc" :token 0]
              (:id (first (core/search idx' (float-array [1 0 0 0]) 1)))))
-      
+
       ;; Second token: [doc-id :token 1]
       (is (= ["test-doc" :token 1]
              (:id (first (core/search idx' (float-array [0 1 0 0]) 1))))))))
@@ -76,13 +76,13 @@
     (let [idx (create-test-index 4)
           ;; Doc 1: two orthogonal vectors
           idx' (colbert/insert-document idx "doc-1"
-                                       [(float-array [1 0 0 0])
-                                        (float-array [0 1 0 0])])
+                                        [(float-array [1 0 0 0])
+                                         (float-array [0 1 0 0])])
           ;; Query: same vectors
           query [(float-array [1 0 0 0])
                  (float-array [0 1 0 0])]
           results (colbert/maxsim-search idx' query 5)]
-      
+
       (is (= 1 (count results)))
       (is (= "doc-1" (:doc-id (first results))))
       ;; MaxSim: both query tokens find exact matches = 2.0
@@ -103,7 +103,7 @@
           query [(float-array [1 0 0 0])
                  (float-array [0 1 0 0])]
           results (colbert/maxsim-search idx' query 5)]
-      
+
       ;; doc-2 should rank higher (both tokens match well)
       ;; doc-1 has one match, one poor match
       (is (= "doc-2" (:doc-id (first results))))
@@ -114,13 +114,13 @@
   (testing "Partial token matches contribute to score"
     (let [idx (create-test-index 4)
           idx' (colbert/insert-document idx "doc-1"
-                                       [(float-array [1 0 0 0])
-                                        (float-array [0.5 0.5 0 0])])
+                                        [(float-array [1 0 0 0])
+                                         (float-array [0.5 0.5 0 0])])
           ;; Query: exact match for first, partial for second
           query [(float-array [1 0 0 0])
                  (float-array [1 0 0 0])]
           results (colbert/maxsim-search idx' query 5)]
-      
+
       ;; Both query tokens can match doc-1's first token
       ;; MaxSim takes max per query token
       (is (= "doc-1" (:doc-id (first results)))))))
@@ -140,7 +140,7 @@
           results (colbert/maxsim-search-filtered
                    idx' query 5
                    #(= % "allowed-doc"))]
-      
+
       (is (= 1 (count results)))
       (is (= "allowed-doc" (:doc-id (first results)))))))
 
@@ -152,18 +152,18 @@
     (let [idx (create-test-index 4)
           idx' (colbert/insert-document idx "doc-1" [(float-array [1 0 0 0])])
           results (colbert/maxsim-search idx' [] 5)]
-      
+
       (is (empty? results)))))
 
 (deftest test-no-matching-documents
   (testing "Query with no matches returns empty"
     (let [idx (create-test-index 4)
           idx' (colbert/insert-document idx "doc-1"
-                                       [(float-array [-1 -1 -1 -1])])
+                                        [(float-array [-1 -1 -1 -1])])
           ;; Query in opposite direction
           query [(float-array [1 1 1 1])]
           results (colbert/maxsim-search idx' query 5 {:ef 10})]
-      
+
       ;; Distance may be too high, might return empty or poor matches
       (is (<= (count results) 1)))))
 
@@ -179,7 +179,7 @@
                                             [(float-array [0.9 0.1 0 0])
                                              (float-array [0.1 0.9 0 0])])
                    (assoc ["doc-2" :title] (float-array [0 0 1 0])))]
-      
+
       ;; Search finds both title vectors and tokens
       (let [result (core/search idx' (float-array [1 0 0 0]) 10)]
         (is (some #(= ["doc-1" :title] (:id %)) result))
@@ -202,7 +202,7 @@
           ;; Weight title higher
           weights {:title 0.7 :content 0.3}
           results (colbert/weighted-field-search idx' query 5 weights)]
-      
+
       (is (= 2 (count results)))
       ;; doc-2 should rank higher (0.7*0.9 + 0.3*1.0 = 0.93)
       ;; vs doc-1 (0.7*1.0 + 0.3*0.0 = 0.7)
@@ -219,7 +219,7 @@
           query (float-array [1 0 0 0])
           weights {:title 0.5 :content 0.5}
           results (colbert/weighted-field-search idx' query 5 weights)]
-      
+
       ;; doc-1 has both fields, should score higher
       (is (= "doc-1" (:doc-id (first results)))))))
 
@@ -235,7 +235,7 @@
           weights {:title 0.5 :author 0.5}
           results (colbert/weighted-field-search-with-constraints
                    idx' query 5 weights #{:author})]
-      
+
       ;; Only doc-1 has author field
       (is (= 1 (count results)))
       (is (= "doc-1" (:doc-id (first results)))))))
@@ -261,7 +261,7 @@
                       (float-array [0 1 0 0])]
           weights {:title 1.0}
           results (colbert/hybrid-search idx' query-vec query-toks 5 weights 0.5)]
-      
+
       (is (<= 1 (count results)))
       ;; Results should have both field and maxsim scores
       (is (contains? (first results) :field-score))
@@ -281,7 +281,7 @@
           results-field (colbert/hybrid-search idx' query-vec query-toks 5 weights 1.0)
           ;; Alpha=0.0: MaxSim dominates (token matches)
           results-maxsim (colbert/hybrid-search idx' query-vec query-toks 5 weights 0.0)]
-      
+
       ;; Both should return doc-1 but with different score composition
       (is (some? (seq results-field)))
       (is (some? (seq results-maxsim))))))

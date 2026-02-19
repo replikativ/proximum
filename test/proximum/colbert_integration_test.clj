@@ -45,7 +45,7 @@
       (when data
         (let [dim (:dim data)
               idx (create-index-for-dim dim)
-              
+
               ;; Insert documents with token embeddings
               idx' (reduce
                     (fn [idx doc]
@@ -55,18 +55,18 @@
                         (colbert/insert-document idx doc-id token-vecs)))
                     idx
                     (:docs data))
-              
+
               ;; Create query token vectors
               query-toks (map #(float-array-from-list (:embedding %))
                               (:query_chunks data))
-              
+
               ;; Run MaxSim search
               results (colbert/maxsim-search idx' query-toks 5 {:ef 100})]
-          
+
           (is (<= 1 (count results)) "Should find at least 1 document")
           (is (every? :doc-id results) "All results should have doc-id")
           (is (every? :maxsim-score results) "All results should have maxsim-score")
-          
+
           ;; With synthetic data, doc-1 should match (embedding is most similar)
           ;; With real embeddings from sentence-transformers, same semantic property
           (is (= "doc-1" (:doc-id (first results)))
@@ -78,7 +78,7 @@
       (when data
         (let [dim (:dim data)
               idx (create-index-for-dim dim)
-              
+
               ;; Use first token of each doc as "title" embedding
               idx' (reduce
                     (fn [idx doc]
@@ -87,12 +87,12 @@
                         (assoc idx [doc-id :title] (float-array-from-list title-emb))))
                     idx
                     (:docs data))
-              
+
               ;; Query with first chunk
               query-vec (-> data :query_chunks first :embedding float-array-from-list)
-              
+
               ;; Weighted search
               results (colbert/weighted-field-search idx' query-vec 5 {:title 1.0})]
-          
+
           (is (<= 1 (count results)))
           (is (every? :doc-id results)))))))

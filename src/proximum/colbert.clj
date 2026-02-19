@@ -42,10 +42,10 @@
      (insert-document idx \"doc-1\" [tok0 tok1 tok2])"
   [idx doc-id token-vecs]
   (reduce-kv
-    (fn [idx' i tok-vec]
-      (assoc idx' [doc-id :token i] tok-vec))
-    idx
-    (into [] token-vecs)))
+   (fn [idx' i tok-vec]
+     (assoc idx' [doc-id :token i] tok-vec))
+   idx
+   (into [] token-vecs)))
 
 (defn insert-documents
   "Insert multiple documents with their token vectors.
@@ -61,10 +61,10 @@
      (insert-documents idx [[\"doc-1\" [toks...]] [\"doc-2\" [toks...]]])"
   [idx docs]
   (reduce
-    (fn [idx' [doc-id token-vecs]]
-      (insert-document idx' doc-id token-vecs))
-    idx
-    docs))
+   (fn [idx' [doc-id token-vecs]]
+     (insert-document idx' doc-id token-vecs))
+   idx
+   docs))
 
 ;; -----------------------------------------------------------------------------
 ;; MaxSim Scoring
@@ -94,8 +94,8 @@
                        ;; We use similarity = 1 - distance (for cosine/L2 normalized)
                        query-groups (group-by :query-idx doc-matches)
                        maxsim (reduce +
-                                     (for [[_ tokens] query-groups]
-                                       (apply max (map #(- 1 (:distance %)) tokens))))]
+                                      (for [[_ tokens] query-groups]
+                                        (apply max (map #(- 1 (:distance %)) tokens))))]
                    {:doc-id doc-id
                     :maxsim-score maxsim
                     :matched-tokens (count doc-matches)}))]
@@ -238,23 +238,23 @@
          by-field (group-by-field results)
          ;; Group by doc-id across all fields
          by-doc (group-by (fn [{:keys [id]}]
-                           (when (vector? id) (first id)))
-                         results)
+                            (when (vector? id) (first id)))
+                          results)
          ;; Compute weighted scores per document
          scored (for [[doc-id matches] by-doc
                       :when doc-id]
-                 (let [;; For each field, get best match and apply weight
-                       field-scores (into {}
-                                         (for [[field field-matches] (group-by-field matches)]
-                                           [field (apply max (map #(- 1 (:distance %)) field-matches))]))
+                  (let [;; For each field, get best match and apply weight
+                        field-scores (into {}
+                                           (for [[field field-matches] (group-by-field matches)]
+                                             [field (apply max (map #(- 1 (:distance %)) field-matches))]))
                        ;; Weighted sum: only include fields with weights
-                       weighted-score (reduce +
-                                             (for [[field weight] field-weights
-                                                   :let [sim (get field-scores field 0)]]
-                                               (* weight sim)))]
-                   {:doc-id doc-id
-                    :score weighted-score
-                    :field-scores field-scores}))]
+                        weighted-score (reduce +
+                                               (for [[field weight] field-weights
+                                                     :let [sim (get field-scores field 0)]]
+                                                 (* weight sim)))]
+                    {:doc-id doc-id
+                     :score weighted-score
+                     :field-scores field-scores}))]
      (take k (sort-by :score > scored)))))
 
 (defn weighted-field-search-with-constraints
@@ -318,29 +318,29 @@
          maxsim-by-doc (into {} (map (juxt :doc-id identity) maxsim-results))
          ;; Combine all doc-ids
          all-doc-ids (into (set (keys field-by-doc))
-                          (keys maxsim-by-doc))
+                           (keys maxsim-by-doc))
          ;; Normalize MaxSim scores to 0-1 range (rough approximation)
          maxsim-max (apply max (map :maxsim-score maxsim-results))
          maxsim-min (apply min (map :maxsim-score maxsim-results))
          maxsim-range (- maxsim-max maxsim-min)
          ;; Compute hybrid scores
          scored (for [doc-id all-doc-ids]
-                 (let [field-rec (get field-by-doc doc-id)
-                       maxsim-rec (get maxsim-by-doc doc-id)
-                       field-score (:score field-rec 0)
-                       raw-maxsim (:maxsim-score maxsim-rec 0)
+                  (let [field-rec (get field-by-doc doc-id)
+                        maxsim-rec (get maxsim-by-doc doc-id)
+                        field-score (:score field-rec 0)
+                        raw-maxsim (:maxsim-score maxsim-rec 0)
                        ;; Normalize maxsim to 0-1
-                       maxsim-norm (if (pos? maxsim-range)
-                                    (/ (- raw-maxsim maxsim-min) maxsim-range)
-                                    0.5)
+                        maxsim-norm (if (pos? maxsim-range)
+                                      (/ (- raw-maxsim maxsim-min) maxsim-range)
+                                      0.5)
                        ;; Hybrid score
-                       hybrid-score (+ (* alpha field-score)
-                                      (* (- 1 alpha) maxsim-norm))]
-                   {:doc-id doc-id
-                    :score hybrid-score
-                    :field-score field-score
-                    :maxsim-score raw-maxsim
-                    :maxsim-norm maxsim-norm
-                    :field-scores (:field-scores field-rec)
-                    :matched-tokens (:matched-tokens maxsim-rec 0)}))]
+                        hybrid-score (+ (* alpha field-score)
+                                        (* (- 1 alpha) maxsim-norm))]
+                    {:doc-id doc-id
+                     :score hybrid-score
+                     :field-score field-score
+                     :maxsim-score raw-maxsim
+                     :maxsim-norm maxsim-norm
+                     :field-scores (:field-scores field-rec)
+                     :matched-tokens (:matched-tokens maxsim-rec 0)}))]
      (take k (sort-by :score > scored)))))
