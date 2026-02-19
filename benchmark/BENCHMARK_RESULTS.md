@@ -204,15 +204,15 @@ python benchmark/benchmark_datasets.py glove100
 python benchmark/benchmark_datasets.py dbpedia-openai-100k  # requires: pip install datasets
 
 # Run all benchmarks on a dataset
-python3 benchmark/run_benchmarks.py --dataset sift10k --runs 3 --warmup 1
-python3 benchmark/run_benchmarks.py --dataset glove100
-python3 benchmark/run_benchmarks.py --dataset dbpedia-openai-100k
+clj -M:benchmark -m runner sift10k --runs 3
+clj -M:benchmark -m runner glove100
+clj -M:benchmark -m runner dbpedia-openai-100k
 
 # Run specific library only
-python3 benchmark/run_benchmarks.py --dataset sift1m --only pv --skip-download
+clj -M:benchmark -m runner sift1m --only proximum --skip-download
 
 # Available datasets: sift10k, sift1m, glove100, glove10k, dbpedia-openai-100k, dbpedia-openai-1m
-# Available libraries: pv, datalevin, hnswlib, jvector, lucene, hnswlib-java
+# Available libraries: proximum, jvector, lucene, hnswlib-java, datalevin, hnswlib
 ```
 
 ---

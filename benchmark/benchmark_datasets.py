@@ -27,7 +27,8 @@ import struct
 import tarfile
 import numpy as np
 from pathlib import Path
-from urllib.request import urlretrieve
+from urllib.request import urlretrieve, Request, urlopen
+from urllib.error import HTTPError
 
 DATASETS_DIR = Path(__file__).parent / "data"
 
@@ -149,8 +150,32 @@ def download_hdf5_dataset(name):
     hdf5_file = DATASETS_DIR / info["filename"]
     if not hdf5_file.exists():
         print(f"Downloading {name} from {info['url']}...")
-        urlretrieve(info["url"], hdf5_file, download_progress)
-        print()
+        
+        # Try with User-Agent header to avoid 403 from some servers
+        try:
+            req = Request(info["url"], headers={"User-Agent": "Mozilla/5.0"})
+            with urlopen(req) as response, open(hdf5_file, "wb") as out_file:
+                total_size = int(response.headers.get("content-length", 0))
+                downloaded = 0
+                chunk_size = 1024 * 1024  # 1MB chunks
+                while True:
+                    chunk = response.read(chunk_size)
+                    if not chunk:
+                        break
+                    out_file.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size:
+                        percent = min(100, downloaded * 100 // total_size)
+                        bar_len = 40
+                        filled = int(bar_len * percent // 100)
+                        bar = "=" * filled + "-" * (bar_len - filled)
+                        print(f"\r  [{bar}] {percent}%", end="", flush=True)
+            print()
+        except HTTPError as e:
+            print(f"\n  HTTP {e.code}: {e.reason}")
+            print(f"  Try downloading manually: curl -O {info['url']}")
+            print(f"  Then move to: {hdf5_file}")
+            sys.exit(1)
 
     print(f"Dataset ready at {hdf5_file}")
     return hdf5_file

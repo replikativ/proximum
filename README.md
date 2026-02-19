@@ -132,6 +132,95 @@ implementation 'org.replikativ:proximum:LATEST'
 
 ---
 
+## Design Rationale: Why Not JVector?
+
+You might wonder: **Why build Proximum instead of extending JVector?** After all, JVector (DataStax) is a mature HNSW implementation with quantization support.
+
+### The Short Answer
+
+Proximum **aims at peak performance** (see benchmarks below) while adding **git-like versioning**. The architectures serve different goals: JVector optimizes for quantization at scale; Proximum optimizes for versioning with structural sharing.
+
+**Where JVector leads:** Quantization (PQ/BQ/NVQ) enables larger-than-memory indices (>10M vectors) by keeping compressed vectors in RAM and correcting with full-resolution reads. This is on Proximum's roadmap.
+
+### Architectural Comparison
+
+| Aspect | JVector | Proximum |
+|--------|---------|----------|
+| **Edge Storage** | Per-node `Neighbors` objects | Chunked `int[][]` arrays |
+| **Fork Cost** | O(nodes) — copy all neighbors | O(chunks) — shallow array clone |
+| **Versioning** | None (write-once) | Git-like (commits, branches, merge) |
+| **Persistence** | File-centric, single backend | Pluggable (memory, file, S3, etc.) |
+| **Structural Sharing** | No | Yes (chunk-level copy-on-write) |
+| **Quantization** | Yes (PQ/BQ/NVQ) | Roadmap |
+
+### The Chunking Difference
+
+This is the key architectural decision that enables git-like features:
+
+```java
+// JVector: Each node has its own neighbor array
+DenseIntMap<Neighbors> neighbors;  // ~1M objects for 1M nodes
+
+// Proximum: Nodes are grouped into chunks
+int[][] layer0;  // ~1000 chunks for 1M nodes (1024 nodes/chunk)
+```
+
+**Why this matters for branching:**
+
+```java
+// JVector "fork" would require:
+for (int i = 0; i < 1_000_000; i++) {
+    newNeighbors[i] = oldNeighbors[i].copy();  // O(nodes)
+}
+
+// Proximum fork:
+int[][] newLayer0 = layer0.clone();  // O(chunks) — shallow clone
+// Only ~1000 array references copied, data is shared
+```
+
+### What Would JVector Need?
+
+Adding git-like features to JVector would require:
+
+1. **Chunk-based edge storage** — Replace `DenseIntMap<Neighbors>` with chunked arrays
+2. **Copy-on-write semantics** — Track dirty chunks for incremental persistence
+3. **Versioning system** — Commit graph, branch tracking, merge logic
+4. **Storage abstraction** — Content-addressable chunks, pluggable backends
+5. **Immutable API** — `fork()` method, transient/persistent modes
+
+These are **fundamental architectural changes**, not additions. JVector's CAS-based concurrent mutation model optimizes for throughput without versioning overhead.
+
+### Different Use Cases
+
+| JVector Shines At | Proximum Shines At |
+|-------------------|-------------------|
+| Very large indices (>10M) with quantization | Knowledge management with history |
+| Memory-constrained deployments | A/B testing embedding models |
+| Simple API, single version | Audit trails and compliance |
+| Java-centric production systems | Clojure persistent data structures |
+
+### Integration Possibilities
+
+Proximum could integrate with JVector at the **algorithm layer**:
+
+- SIMD distance computation (Panama Vector API)
+- PQ/BQ/NVQ compression algorithms
+- Search patterns (two-pass, reranking)
+
+But the **versioning layer** requires Proximum's specialized architecture.
+
+### Lessons from Lucene
+
+We successfully added git-like features to Lucene's HNSW implementation because Lucene's architecture already had:
+
+- Segment-based storage (natural chunking)
+- Read-only index readers (immutable snapshots)
+- Point-in-time search semantics
+
+JVector lacks these primitives. Proximum builds them from the ground up.
+
+---
+
 ## Key Features
 
 ### 🔄 Versioning & Time Travel
@@ -264,13 +353,20 @@ EmbeddingStore<TextSegment> store = ProximumEmbeddingStore.builder()
 
 **SIFT-1M (1M vectors, 128-dim, Intel Core Ultra 7):**
 
-| Implementation | Search QPS | Insert (vec/s) | p50 Latency | Recall@10 |
-|----------------|------------|----------------|-------------|-----------|
-| hnswlib (C++) | 7,849 | 18,205 | 131 µs | 98.32% |
-| **Proximum** | **3,750** (48%) | 9,621 | **262 µs** | **98.66%** |
-| lucene-hnsw | 3,095 (39%) | 2,347 | 333 µs | 98.53% |
-| jvector | 1,844 (23%) | 6,095 | 557 µs | 95.95% |
-| hnswlib-java | 1,004 (13%) | 4,329 | 1,041 µs | 98.30% |
+~~~bash
+# clj -M:benchmark -m runner sift1m
+
+...
+
+Library                   Insert (vec/s)  Search QPS   p50 (us)   p99 (us)   Recall@10 
+--------------------------------------------------------------------------------------
+proximum                  13392           3844         264.1      461.0      98.63%
+jvector                   9771            3609         277.4      485.2      95.95%
+lucene-hnsw               2395            3036         340.5      467.1      98.53%
+hnswlib-java              4260            1007         1033.3     1377.4     98.29%
+datalevin/usearch         2492            3616         268.1      375.1      96.96%
+~~~
+
 
 **Proximum metrics:**
 - Storage: 762.8 MB
@@ -349,7 +445,3 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for:
 - **Issues**: [GitHub Issues](https://github.com/replikativ/proximum/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/replikativ/proximum/discussions)
 - **Commercial Support**: contact@datahike.io
-
----
-
-Built with ❤️ by the replikativ team

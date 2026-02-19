@@ -112,14 +112,15 @@
   "Run a Clojure benchmark via clj command"
   [bench-ns dataset-name {:keys [M ef-construction ef-search threads warmup heap cosine?]
                           :or {M 16 ef-construction 200 ef-search 100 threads 8
-                               warmup (if (str/includes? (name dataset-name) "1m") 0 5)
-                               heap (if (str/includes? (name dataset-name) "1m") "8g" "4g")}}]
+                               warmup (if (#{:sift10k} dataset-name) 5 0)
+                               heap (if (#{:sift10k} dataset-name) "4g" "8g")}}]
   (println-stderr (format "\n=== Running %s ===" bench-ns))
-  (let [cmd ["clj"
-             (str "-J-Xmx" heap)
-             "-J--add-modules=jdk.incubator.vector"
-             "-J--enable-native-access=ALL-UNNAMED"
-             (str "-J-Dproximum.physical_cores=" threads)
+(let [cmd ["clj"
+              (str "-J-Xmx" heap)
+              "-J--add-modules=jdk.incubator.vector"
+              "-J--enable-native-access=ALL-UNNAMED"
+              "-J-XX:-UseJVMCICompiler"
+              (str "-J-Dproximum.physical_cores=" threads)
              "-M:benchmark"
              "-m" bench-ns
              (name dataset-name)
@@ -236,7 +237,7 @@
 ;; Main runner
 
 (defn run-suite [dataset-name {:keys [runs only skip-download]
-                                :or {runs (if (str/includes? (name dataset-name) "1m") 3 1)}
+                                :or {runs (if (#{:sift10k} dataset-name) 3 1)}
                                 :as opts}]
   (println-stderr (apply str (repeat 60 "=")))
   (println-stderr "HNSW Benchmark Suite")

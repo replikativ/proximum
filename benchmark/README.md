@@ -8,13 +8,13 @@ Pure Clojure benchmark runner for HNSW implementations with minimal dependencies
 
 ```bash
 # Quick test (10k vectors, ~1 minute)
-./benchmark/run-bench.sh sift10k --only proximum
+clj -M:benchmark -m runner sift10k --only proximum
 
 # Full test suite on SIFT10k (~5 minutes, all JVM libraries)
-./benchmark/run-bench.sh sift10k
+clj -M:benchmark -m runner sift10k
 
 # Multiple runs for variance measurement
-./benchmark/run-bench.sh sift10k --runs 3
+clj -M:benchmark -m runner sift10k --runs 3
 ```
 
 **Note:** No Python needed for Proximum-only benchmarks. Python required for dataset download and optional hnswlib baseline.
@@ -63,35 +63,35 @@ python3 benchmark/benchmark_datasets.py sift10k
 python3 benchmark/benchmark_datasets.py glove100
 
 # Run full benchmark suite
-./benchmark/run-bench.sh sift10k
+clj -M:benchmark -m runner sift10k
 ```
 
 ## Usage Examples
 
 ```bash
 # Quick validation - Proximum only on SIFT10k
-./benchmark/run-bench.sh sift10k --only proximum
+clj -M:benchmark -m runner sift10k --only proximum
 
 # Specific library
-./benchmark/run-bench.sh sift10k --only jvector
+clj -M:benchmark -m runner sift10k --only jvector
 
 # All libraries (includes hnswlib if Python env exists)
-./benchmark/run-bench.sh sift10k
+clj -M:benchmark -m runner sift10k
 
 # Multiple runs for statistical significance
-./benchmark/run-bench.sh sift10k --runs 3
+clj -M:benchmark -m runner sift10k --runs 3
 
 # Large dataset
-./benchmark/run-bench.sh sift1m
+clj -M:benchmark -m runner sift1m
 
 # High-dimensional LLM embeddings
-./benchmark/run-bench.sh dbpedia-openai-100k
+clj -M:benchmark -m runner dbpedia-openai-100k
 
 # Custom HNSW parameters
-./benchmark/run-bench.sh sift10k --M 32 --ef-construction 400 --ef-search 200
+clj -M:benchmark -m runner sift10k --M 32 --ef-construction 400 --ef-search 200
 
 # Skip dataset download check
-./benchmark/run-bench.sh sift10k --skip-download
+clj -M:benchmark -m runner sift10k --skip-download
 ```
 
 ## Command-Line Options
@@ -152,7 +152,6 @@ Each implementation has its own benchmark namespace:
 
 - `benchmark_datasets.py` - Dataset download utility
 - `hnswlib_bench.py` - C++ hnswlib baseline (requires Python bindings)
-- `plot_results.py` - Visualization (optional)
 
 ## Advanced Benchmarks
 
@@ -207,7 +206,7 @@ clj -M:dev -m bench-early-termination sift1m --test all
 rm -rf benchmark/results/*
 
 # Run fresh benchmarks
-./benchmark/run-bench.sh sift10k --runs 3
+clj -M:benchmark -m runner sift10k --runs 3
 ```
 
 ## See Also

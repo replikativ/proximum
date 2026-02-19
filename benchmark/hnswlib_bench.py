@@ -130,5 +130,5 @@ if __name__ == "__main__":
         sys.exit(1)
 
     results = benchmark(dataset_name=dataset, M=M, ef_construction=ef_c, ef_search=ef_s)
-    # Output single-line JSON for easy parsing by run_benchmarks.py
+    # Output single-line JSON for easy parsing by runner.clj
     print(json.dumps(results))
