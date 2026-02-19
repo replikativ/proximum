@@ -3,7 +3,11 @@
 
    Provides PSS-backed storage for:
    - Node metadata: arbitrary maps associated with vector IDs
-   - External ID index: string-based external IDs mapped to internal node IDs
+   - External ID index: supports both simple IDs (string, UUID, Long) and
+     compound keys (vectors like [\"doc-1\" :title] or [\"doc-1\" :content 0])
+
+   Compound keys enable multi-field indexing (Cozo-style) and ColBERT token-level
+   indexing where each document can have multiple vectors keyed by field path.
 
    Both use PersistentSortedSet for O(log n) operations with structural sharing."
   (:require [org.replikativ.persistent-sorted-set :as pss]
@@ -19,19 +23,47 @@
         id-b (if (map? b) (:node-id b) b)]
     (Long/compare (long id-a) (long id-b))))
 
+(defn compare-coll
+  "Lexicographic comparison for nested collections.
+   Compares element-by-element, recursing into nested collections.
+   Shorter collection is less than longer if all elements equal."
+  [a b]
+  (cond
+    (and (coll? a) (coll? b))
+    (loop [a-seq (seq a) b-seq (seq b)]
+      (cond
+        (and (nil? a-seq) (nil? b-seq)) 0
+        (nil? a-seq) -1
+        (nil? b-seq) 1
+        :else
+        (let [c (compare-coll (first a-seq) (first b-seq))]
+          (if (zero? c)
+            (recur (next a-seq) (next b-seq))
+            c))))
+    
+    (and (coll? a) (not (coll? b))) -1
+    (and (not (coll? a)) (coll? b)) 1
+    
+    (and (= (type a) (type b)) (instance? Comparable a))
+    (compare a b)
+    
+    :else
+    (let [c (compare (.getName (class a)) (.getName (class b)))]
+      (if (zero? c)
+        (compare (pr-str a) (pr-str b))
+        c))))
+
 (defn external-id-comparator
   "Compare external-id entries by external-id.
-   Supports any comparable types. Mixed types are compared by class name then pr-str."
+   Supports:
+   - Simple IDs: String, UUID, Long, etc.
+   - Compound IDs: vectors like [\"doc-1\" :title] or [\"doc-1\" :content 0]
+   
+   Compound keys use lexicographic comparison, enabling multi-field indexing."
   [a b]
   (let [id-a (if (map? a) (:external-id a) a)
         id-b (if (map? b) (:external-id b) b)]
-    (if (= (type id-a) (type id-b))
-      (compare id-a id-b)
-      ;; Different types: compare by class name, then string representation
-      (let [c (compare (.getName (class id-a)) (.getName (class id-b)))]
-        (if (zero? c)
-          (compare (pr-str id-a) (pr-str id-b))
-          c)))))
+    (compare-coll id-a id-b)))
 
 ;; -----------------------------------------------------------------------------
 ;; PSS Creation
