@@ -367,10 +367,37 @@ hnswlib-java              4260            1007         1033.3     1377.4     98.
 datalevin/usearch         2492            3616         268.1      375.1      96.96%
 ~~~
 
-
 **Proximum metrics:**
 - Storage: 762.8 MB
 - Heap usage: 545.7 MB
+
+~~~bash
+# clj -M:benchmark -m runner dbpedia-openai-100k
+
+...
+
+Library                   Insert (vec/s)  Search QPS   p50 (us)   p99 (us)   Recall@10 
+--------------------------------------------------------------------------------------
+proximum                  3726            1648         621.3      874.2      99.10%
+jvector                   4267            1795         570.0      798.0      98.65%
+lucene-hnsw               969             1306         787.2      1113.7     99.28%
+hnswlib-java              2070            609          1688.2     2230.4     99.22%
+datalevin/usearch         941             1364         700.5      955.1      98.76%
+~~~
+
+~~~bash
+#  clj -M:benchmark -m runner glove100
+
+...
+
+Library                   Insert (vec/s)  Search QPS   p50 (us)   p99 (us)   Recall@10 
+----------------------------------------------------------------------------------
+proximum                  7437            2604         382.6      638.6      81.93%
+jvector                   7613            2620         361.9      691.4      70.14%
+lucene-hnsw               1500            2031         482.9      819.2      81.35%
+hnswlib-java              2779            722          1380.9     2236.5     80.91%
+datalevin/usearch         1455            2424         403.8      661.8      75.67%
+~~~
 
 **Key features:**
 - Pure JVM with SIMD acceleration (Java Vector API)
