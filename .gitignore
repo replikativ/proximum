@@ -66,6 +66,12 @@ out/
 .\#*
 .projectile
 
+# Eclipse
+.project
+.classpath
+.settings/
+.factorypath
+
 # Vim
 *.swp
 *.swo
