@@ -239,3 +239,74 @@
       ;; They are independent structures
       (is (nil? (meta/lookup-metadata meta-pss' 999)))
       (is (nil? (meta/lookup-external-id ext-pss' :nonexistent))))))
+
+;; -----------------------------------------------------------------------------
+;; Compound Key Tests (Multi-field indexing, Cozo-style)
+
+(deftest test-compare-coll-simple
+  (testing "compare-coll with simple values"
+    (is (zero? (meta/compare-coll "a" "a")))
+    (is (neg? (meta/compare-coll "a" "b")))
+    (is (pos? (meta/compare-coll "b" "a")))
+    (is (neg? (meta/compare-coll :a :b)))
+    (is (neg? (meta/compare-coll 1 2)))))
+
+(deftest test-compare-coll-vectors
+  (testing "compare-coll with vectors (lexicographic)"
+    (is (zero? (meta/compare-coll ["a" :b] ["a" :b])))
+    (is (neg? (meta/compare-coll ["a" :b] ["a" :c])) "Second element compared")
+    (is (neg? (meta/compare-coll ["a" :b] ["b" :a])) "First element compared")
+    (is (neg? (meta/compare-coll ["a"] ["a" :b])) "Shorter vector is less")
+    (is (neg? (meta/compare-coll ["a" :b] ["a" :b 0])) "Shorter vector is less")))
+
+(deftest test-compare-coll-nested
+  (testing "compare-coll with nested vectors"
+    (is (zero? (meta/compare-coll ["doc" [:meta :title]] ["doc" [:meta :title]])))
+    (is (neg? (meta/compare-coll ["doc" [:meta :a]] ["doc" [:meta :b]])))
+    (is (neg? (meta/compare-coll ["doc" [:a]] ["doc" [:a :b]])))))
+
+(deftest test-compare-coll-mixed-types
+  (testing "compare-coll handles mixed types"
+    (is (neg? (meta/compare-coll ["a"] "a")) "Vector < string")
+    (is (pos? (meta/compare-coll "a" ["a"])) "String > vector")))
+
+(deftest test-compound-key-external-id
+  (testing "Compound keys in external-id-index"
+    (let [pss (meta/create-external-id-pss nil)
+          pss' (-> pss
+                   (meta/set-external-id ["doc-1" :title] 0)
+                   (meta/set-external-id ["doc-1" :content 0] 1)
+                   (meta/set-external-id ["doc-1" :content 1] 2)
+                   (meta/set-external-id ["doc-2" :title] 3))]
+
+      (is (= 0 (meta/lookup-external-id pss' ["doc-1" :title])))
+      (is (= 1 (meta/lookup-external-id pss' ["doc-1" :content 0])))
+      (is (= 2 (meta/lookup-external-id pss' ["doc-1" :content 1])))
+      (is (= 3 (meta/lookup-external-id pss' ["doc-2" :title])))
+      (is (nil? (meta/lookup-external-id pss' ["doc-1" :nonexistent]))))))
+
+(deftest test-compound-and-simple-keys-together
+  (testing "Compound and simple keys can coexist"
+    (let [pss (meta/create-external-id-pss nil)
+          pss' (-> pss
+                   (meta/set-external-id "simple-id" 0)
+                   (meta/set-external-id ["doc-1" :title] 1)
+                   (meta/set-external-id :keyword-id 2))]
+
+      (is (= 0 (meta/lookup-external-id pss' "simple-id")))
+      (is (= 1 (meta/lookup-external-id pss' ["doc-1" :title])))
+      (is (= 2 (meta/lookup-external-id pss' :keyword-id))))))
+
+(deftest test-compound-key-uniqueness
+  (testing "Compound keys enforce uniqueness"
+    (let [pss (meta/create-external-id-pss nil)
+          pss' (meta/set-external-id pss ["doc-1" :title] 0)]
+
+      ;; Same key, same node: ok
+      (is (some? (meta/set-external-id pss' ["doc-1" :title] 0)))
+
+      ;; Same key, different node: throws
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"External id already exists"
+           (meta/set-external-id pss' ["doc-1" :title] 1))))))
