@@ -119,4 +119,4 @@ The full CLA text is available in the repository:
 ## Questions?
 
 - Open an issue for licensing questions
-- Email: [contact@replikativ.io](mailto:contact@replikativ.io) for commercial licensing inquiries
+- Email: [contact@replikativ.io](mailto:contact@datahike.io) for commercial licensing inquiries
