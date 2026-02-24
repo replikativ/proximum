@@ -42,11 +42,11 @@ class PhysicalCoreExecutor {
 }
 
 /**
- * High-performance parallel HNSW insert using PersistentEdgeStore.
+ * High-performance parallel HNSW insert using PersistentEdgeIndex.
  *
  * This implementation uses:
- * - PersistentEdgeStore for chunked copy-on-write edge storage
- * - Per-node locks from PersistentEdgeStore for concurrent updates
+ * - PersistentEdgeIndex for chunked copy-on-write edge storage
+ * - Per-node locks from PersistentEdgeIndex for concurrent updates
  * - Diversity heuristic for neighbor selection (hnswlib style)
  * - SIMD distance computation
  * - ForkJoinPool for parallel batch insert
@@ -77,7 +77,7 @@ public final class HnswInsert {
     // Concurrent candidate tracking: in-flight inserts that can be considered as neighbors
     // Maps (edges instance, nodeId) -> vector for nodes currently being inserted
     // This allows parallel inserts to see each other as potential neighbors
-    // IMPORTANT: Scoped per PersistentEdgeStore to prevent cross-index contamination during compaction
+    // IMPORTANT: Scoped per PersistentEdgeIndex to prevent cross-index contamination during compaction
     private static final ConcurrentHashMap<InFlightKey, float[]> IN_FLIGHT_INSERTS = new ConcurrentHashMap<>();
 
     // Composite key for in-flight inserts: (edges instance identity, nodeId)
@@ -112,7 +112,7 @@ public final class HnswInsert {
      */
     public static void insert(
             MemorySegment seg,
-            PersistentEdgeStore edges,
+            PersistentEdgeIndex edges,
             float[] vector,
             int nodeId,
             int dim,
@@ -128,7 +128,7 @@ public final class HnswInsert {
      * Insert a single vector into the HNSW graph.
      *
      * @param seg           MemorySegment for vector storage
-     * @param edges         PersistentEdgeStore for graph edges
+     * @param edges         PersistentEdgeIndex for graph edges
      * @param vector        The vector to insert (float[])
      * @param nodeId        Pre-allocated node ID for this vector
      * @param dim           Vector dimensionality
@@ -138,7 +138,7 @@ public final class HnswInsert {
      */
     public static void insert(
             MemorySegment seg,
-            PersistentEdgeStore edges,
+            PersistentEdgeIndex edges,
             float[] vector,
             int nodeId,
             int dim,
@@ -161,7 +161,7 @@ public final class HnswInsert {
      */
     private static void insertInternal(
             MemorySegment seg,
-            PersistentEdgeStore edges,
+            PersistentEdgeIndex edges,
             float[] vector,
             int nodeId,
             int dim,
@@ -263,7 +263,7 @@ public final class HnswInsert {
      */
     public static void insertBatch(
             MemorySegment seg,
-            PersistentEdgeStore edges,
+            PersistentEdgeIndex edges,
             float[][] vectors,
             int[] nodeIds,
             int dim,
@@ -280,7 +280,7 @@ public final class HnswInsert {
      */
     public static void insertBatch(
             MemorySegment seg,
-            PersistentEdgeStore edges,
+            PersistentEdgeIndex edges,
             float[][] vectors,
             int[] nodeIds,
             int dim,
@@ -312,7 +312,7 @@ public final class HnswInsert {
         private static final int THRESHOLD = 100;
 
         private final MemorySegment seg;
-        private final PersistentEdgeStore edges;
+        private final PersistentEdgeIndex edges;
         private final float[][] vectors;
         private final int[] nodeIds;
         private final int dim;
@@ -322,7 +322,7 @@ public final class HnswInsert {
         private final int end;
         private final int distanceType;
 
-        InsertTask(MemorySegment seg, PersistentEdgeStore edges, float[][] vectors,
+        InsertTask(MemorySegment seg, PersistentEdgeIndex edges, float[][] vectors,
                    int[] nodeIds, int dim, int[] nodeLevels, int efConstruction,
                    int start, int end, int distanceType) {
             this.seg = seg;
@@ -381,7 +381,7 @@ public final class HnswInsert {
      */
     private static SearchResult searchLayer(
             MemorySegment seg,
-            PersistentEdgeStore edges,
+            PersistentEdgeIndex edges,
             float[] query,
             int dim,
             int entryPoint,
@@ -504,7 +504,7 @@ public final class HnswInsert {
      */
     private static int searchLayerGreedy(
             MemorySegment seg,
-            PersistentEdgeStore edges,
+            PersistentEdgeIndex edges,
             float[] query,
             int dim,
             int entryPoint,
@@ -605,7 +605,7 @@ public final class HnswInsert {
      *
      * @param seg           MemorySegment for vector storage
      * @param dim           Vector dimensionality
-     * @param edgesId       Identity hash of PersistentEdgeStore - used to scope in-flight lookups
+     * @param edgesId       Identity hash of PersistentEdgeIndex - used to scope in-flight lookups
      * @param nodeId        The node being inserted
      * @param vector        The vector being inserted
      * @param candidates    Search result candidates from graph traversal
@@ -709,7 +709,7 @@ public final class HnswInsert {
     private static void addReverseEdge(
             MemorySegment seg,
             int dim,
-            PersistentEdgeStore edges,
+            PersistentEdgeIndex edges,
             int layer,
             int neighborId,
             int newNodeId,
@@ -810,7 +810,7 @@ public final class HnswInsert {
      * Distance between any two nodes - handles in-flight vectors (not yet in segment).
      * If a node is in IN_FLIGHT_INSERTS, uses its vector; otherwise reads from segment.
      *
-     * @param edgesId Identity hash of PersistentEdgeStore - used to scope in-flight lookups
+     * @param edgesId Identity hash of PersistentEdgeIndex - used to scope in-flight lookups
      */
     private static double distanceAnyNodes(MemorySegment seg, int dim, int edgesId, int nodeA, int nodeB, int distanceType) {
         InFlightKey keyA = new InFlightKey(edgesId, nodeA);
@@ -979,7 +979,7 @@ public final class HnswInsert {
      */
     public static void delete(
             MemorySegment seg,
-            PersistentEdgeStore edges,
+            PersistentEdgeIndex edges,
             int nodeId,
             int dim,
             int M,
@@ -998,7 +998,7 @@ public final class HnswInsert {
      * This is the standard HNSW delete approach - same heuristic used for insert.
      *
      * @param seg          MemorySegment for vector storage
-     * @param edges        PersistentEdgeStore
+     * @param edges        PersistentEdgeIndex
      * @param nodeId       Node ID to delete
      * @param dim          Vector dimensionality
      * @param M            Max neighbors for upper layers
@@ -1007,7 +1007,7 @@ public final class HnswInsert {
      */
     public static void delete(
             MemorySegment seg,
-            PersistentEdgeStore edges,
+            PersistentEdgeIndex edges,
             int nodeId,
             int dim,
             int M,
@@ -1029,7 +1029,7 @@ public final class HnswInsert {
      */
     private static void deleteInternal(
             MemorySegment seg,
-            PersistentEdgeStore edges,
+            PersistentEdgeIndex edges,
             int nodeId,
             int dim,
             int M,
@@ -1086,7 +1086,7 @@ public final class HnswInsert {
      */
     private static void repairNeighbor(
             MemorySegment seg,
-            PersistentEdgeStore edges,
+            PersistentEdgeIndex edges,
             int layer,
             int neighborId,
             int deletedId,
@@ -1175,7 +1175,7 @@ public final class HnswInsert {
      * Find new entrypoint when current is deleted.
      * Skips deleted nodes (those with no neighbors).
      */
-    private static int findNewEntrypoint(PersistentEdgeStore edges, int deletedId, int maxLevel) {
+    private static int findNewEntrypoint(PersistentEdgeIndex edges, int deletedId, int maxLevel) {
         // Start from highest level, find first non-deleted neighbor
         for (int level = maxLevel; level >= 0; level--) {
             int[] neighbors = edges.getNeighbors(level, deletedId);

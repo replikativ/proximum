@@ -1,5 +1,5 @@
 (ns proximum.pes-stress-test
-  "Low-level stress tests for PersistentEdgeStore.
+  "Low-level stress tests for PersistentEdgeIndex.
 
    Tests CoW visibility, fork isolation, and concurrent operations
    directly at the PES level to verify thread safety and correctness
@@ -13,14 +13,14 @@
    NOTE: After persistent semantics changes, all mutations require transient mode.
    Tests must call .asTransient() before mutations and .asPersistent() after."
   (:require [clojure.test :refer :all])
-  (:import [proximum.internal PersistentEdgeStore]
+  (:import [proximum.internal PersistentEdgeIndex]
            [java.util.concurrent CountDownLatch Executors TimeUnit]
            [java.util Random]))
 
 ;; -----------------------------------------------------------------------------
 ;; Test Configuration
 
-(def ^:const CHUNK_SIZE 1024)  ; Must match PersistentEdgeStore.CHUNK_SIZE
+(def ^:const CHUNK_SIZE 1024)  ; Must match PersistentEdgeIndex.CHUNK_SIZE
 
 ;; Default parameters matching typical HNSW usage
 (def default-M 16)
@@ -35,10 +35,10 @@
 ;; Test Utilities
 
 (defn create-pes
-  "Create a fresh PersistentEdgeStore with given capacity."
+  "Create a fresh PersistentEdgeIndex with given capacity."
   ([max-nodes] (create-pes max-nodes default-max-level default-M default-M0))
   ([max-nodes max-level M M0]
-   (PersistentEdgeStore. max-nodes max-level M M0)))
+   (PersistentEdgeIndex. max-nodes max-level M M0)))
 
 (defn random-neighbors
   "Generate random neighbor array of given size."

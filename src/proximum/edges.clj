@@ -1,5 +1,5 @@
 (ns proximum.edges
-  "Konserve-backed edge storage for PersistentEdgeStore.
+  "Konserve-backed edge storage for PersistentEdgeIndex.
 
    Dual storage model (like vectors.clj):
    - PES (Java): Runtime performance with chunked CoW arrays
@@ -36,7 +36,7 @@
   (:require [konserve.core :as k]
             [clojure.core.async :as a]
             [hasch.core :as hasch])
-  (:import [proximum.internal PersistentEdgeStore ChunkStorage]
+  (:import [proximum.internal PersistentEdgeIndex ChunkStorage]
            [java.nio ByteBuffer ByteOrder]
            [java.util UUID]))
 
@@ -149,7 +149,7 @@
      :crypto-hash? - If true, compute and return chunk hashes for commit computation"
   ([store pes existing-address-map]
    (flush-dirty-chunks-async! store pes existing-address-map {}))
-  ([store ^PersistentEdgeStore pes existing-address-map {:keys [crypto-hash?]}]
+  ([store ^PersistentEdgeIndex pes existing-address-map {:keys [crypto-hash?]}]
    (when (.hasDirtyChunks pes)
      (let [dirty-positions (.getDirtyChunks pes)
            ;; Start with existing address map (from previous sync or load)
@@ -189,7 +189,7 @@
 
    Arguments:
      store - Konserve store
-     pes - PersistentEdgeStore
+     pes - PersistentEdgeIndex
      pending-channels - Set of async write channels to wait for
      address-map - Complete position->storage-address map
      new-addresses - Map of just the new addresses assigned to dirty chunks
@@ -204,7 +204,7 @@
      Channel that delivers {:address-map ... :commit-hash ...} when sync completes."
   ([store pes pending-channels address-map new-addresses]
    (sync-edges! store pes pending-channels address-map new-addresses {}))
-  ([store ^PersistentEdgeStore pes pending-channels address-map new-addresses
+  ([store ^PersistentEdgeIndex pes pending-channels address-map new-addresses
     {:keys [softify? chunk-hashes parent-commit-hash] :or {softify? false}}]
    ;; Wait for all pending chunk writes asynchronously
    (a/go
@@ -244,7 +244,7 @@
    Returns {:address-map ... :commit-hash ...}."
   ([store pes existing-address-map]
    (flush-dirty-chunks! store pes existing-address-map {}))
-  ([store ^PersistentEdgeStore pes existing-address-map
+  ([store ^PersistentEdgeIndex pes existing-address-map
     {:keys [crypto-hash? parent-commit-hash] :as opts}]
    (if-let [{:keys [channels address-map new-addresses chunk-hashes]}
             (flush-dirty-chunks-async! store pes existing-address-map opts)]

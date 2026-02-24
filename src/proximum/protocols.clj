@@ -165,7 +165,7 @@
 
   (edge-storage [idx]
     "Get the underlying edge/graph storage implementation.
-     Returns index-specific edge storage (e.g., PersistentEdgeStore for HNSW).
+     Returns index-specific edge storage (e.g., PersistentEdgeIndex for HNSW).
      Returns nil for non-graph indices (e.g., flat indices).
      Used by compaction, metrics, and graph operations."))
 
@@ -216,7 +216,7 @@
   (fork-graph-storage [idx]
     "Fork the graph/edge storage with structural sharing.
 
-     Returns a new graph storage instance (e.g., PersistentEdgeStore)
+     Returns a new graph storage instance (e.g., PersistentEdgeIndex)
      that shares immutable chunks with the original but can be mutated
      independently. Uses copy-on-write semantics.")
 

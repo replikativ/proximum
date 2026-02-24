@@ -24,9 +24,9 @@
   (.-vectors idx))
 
 (defn edges
-  "Get the PersistentEdgeStore from an HnswIndex.
+  "Get the PersistentEdgeIndex from an HnswIndex.
 
-   The PersistentEdgeStore manages the HNSW graph structure with
+   The PersistentEdgeIndex manages the HNSW graph structure with
    copy-on-write semantics."
   [idx]
   (.-pes-edges idx))
