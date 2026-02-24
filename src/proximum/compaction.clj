@@ -27,7 +27,7 @@
             [clojure.core.async :as a]
             [clojure.java.io :as io]
             [konserve.core :as k])
-  (:import [proximum.internal PersistentEdgeStore]))
+  (:import [proximum.internal PersistentEdgeIndex]))
 
 ;; -----------------------------------------------------------------------------
 ;; Offline Compaction
@@ -67,7 +67,7 @@
   ([idx target opts]
    (let [{:keys [parallelism]
           :or {parallelism (.availableProcessors (Runtime/getRuntime))}} opts
-         ^PersistentEdgeStore pes (p/edge-storage idx)
+         ^PersistentEdgeIndex pes (p/edge-storage idx)
          vs (p/vector-storage idx)
          vector-count (vectors/count-vectors vs)
 
@@ -418,7 +418,7 @@
                              {:target target
                               :hint "Pass {:store-config {:backend ... :id ...} :mmap-dir \"/path\"}"})))
 
-         ^PersistentEdgeStore pes (p/edge-storage idx)
+         ^PersistentEdgeIndex pes (p/edge-storage idx)
          vs (p/vector-storage idx)
          vector-count (vectors/count-vectors vs)
          deleted-count (.getDeletedCount pes)

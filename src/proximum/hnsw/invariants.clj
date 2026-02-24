@@ -19,7 +19,7 @@
   (:require [proximum.vectors :as vectors]
             [proximum.protocols :as p]
             [proximum.hnsw.internal :as hnsw.i])
-  (:import [proximum.internal PersistentEdgeStore]))
+  (:import [proximum.internal PersistentEdgeIndex]))
 
 ;; -----------------------------------------------------------------------------
 ;; Individual Invariant Checks
@@ -31,7 +31,7 @@
    - Empty graph: entry point = -1
    - Non-empty graph: entry point >= 0 and < vector-count"
   [idx]
-  (let [^PersistentEdgeStore pes (hnsw.i/edges idx)
+  (let [^PersistentEdgeIndex pes (hnsw.i/edges idx)
         ep (.getEntrypoint pes)
         vec-count (vectors/count-vectors (hnsw.i/vectors idx))]
     (cond
@@ -60,7 +60,7 @@
    Samples up to max-samples nodes to avoid O(n*M) complexity.
    For full verification, use check-all-neighbor-bounds."
   [idx & {:keys [max-samples] :or {max-samples 1000}}]
-  (let [^PersistentEdgeStore pes (hnsw.i/edges idx)
+  (let [^PersistentEdgeIndex pes (hnsw.i/edges idx)
         vec-count (vectors/count-vectors (hnsw.i/vectors idx))
         max-level (.getCurrentMaxLevel pes)
         errors (atom [])]
@@ -98,7 +98,7 @@
    Layer 0: max M0 neighbors
    Upper layers: max M neighbors"
   [idx & {:keys [max-samples] :or {max-samples 1000}}]
-  (let [^PersistentEdgeStore pes (hnsw.i/edges idx)
+  (let [^PersistentEdgeIndex pes (hnsw.i/edges idx)
         vec-count (vectors/count-vectors (hnsw.i/vectors idx))
         max-level (.getCurrentMaxLevel pes)
         M (.getM pes)
@@ -148,7 +148,7 @@
    (HNSW doesn't require full connectivity), but verifies
    the search path works."
   [idx query-vec & {:keys [max-hops] :or {max-hops 1000}}]
-  (let [^PersistentEdgeStore pes (hnsw.i/edges idx)
+  (let [^PersistentEdgeIndex pes (hnsw.i/edges idx)
         ep (.getEntrypoint pes)
         max-level (.getCurrentMaxLevel pes)]
 
@@ -191,7 +191,7 @@
 (defn check-no-self-loops
   "Check that no node has itself as a neighbor (self-loops)."
   [idx & {:keys [max-samples] :or {max-samples 1000}}]
-  (let [^PersistentEdgeStore pes (hnsw.i/edges idx)
+  (let [^PersistentEdgeIndex pes (hnsw.i/edges idx)
         vec-count (vectors/count-vectors (hnsw.i/vectors idx))
         max-level (.getCurrentMaxLevel pes)
         errors (atom [])]
@@ -228,7 +228,7 @@
 
    Returns stats rather than pass/fail."
   [idx]
-  (let [^PersistentEdgeStore pes (hnsw.i/edges idx)
+  (let [^PersistentEdgeIndex pes (hnsw.i/edges idx)
         vec-count (vectors/count-vectors (hnsw.i/vectors idx))
         max-level (.getCurrentMaxLevel pes)
         ep (.getEntrypoint pes)]
@@ -277,7 +277,7 @@
    is performed. Use :strict false to only check that the delete repair worked
    on immediate neighbors (not the whole graph)."
   [idx & {:keys [max-samples strict] :or {max-samples 1000 strict true}}]
-  (let [^PersistentEdgeStore pes (hnsw.i/edges idx)
+  (let [^PersistentEdgeIndex pes (hnsw.i/edges idx)
         vec-count (vectors/count-vectors (hnsw.i/vectors idx))
         max-level (.getCurrentMaxLevel pes)
         errors (atom [])]
@@ -317,7 +317,7 @@
    Note: HNSW doesn't strictly guarantee full connectivity, but poor
    connectivity indicates graph quality issues."
   [idx]
-  (let [^PersistentEdgeStore pes (hnsw.i/edges idx)
+  (let [^PersistentEdgeIndex pes (hnsw.i/edges idx)
         ep (.getEntrypoint pes)]
 
     (if (neg? ep)
@@ -347,7 +347,7 @@
 
    For a healthy HNSW graph, almost all nodes should be reachable."
   [idx & {:keys [min-ratio] :or {min-ratio 0.95}}]
-  (let [^PersistentEdgeStore pes (hnsw.i/edges idx)
+  (let [^PersistentEdgeIndex pes (hnsw.i/edges idx)
         vec-count (vectors/count-vectors (hnsw.i/vectors idx))
         deleted-count (.getDeletedCount pes)
         live-count (- vec-count deleted-count)]

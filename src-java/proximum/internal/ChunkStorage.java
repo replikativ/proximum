@@ -1,7 +1,7 @@
 package proximum.internal;
 
 /**
- * Storage interface for lazy chunk loading in PersistentEdgeStore.
+ * Storage interface for lazy chunk loading in PersistentEdgeIndex.
  *
  * Implementations can back chunks with any storage (konserve, mmap, etc).
  * When a chunk is accessed but not in memory, restore() is called to load it.

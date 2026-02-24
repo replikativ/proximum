@@ -5,7 +5,7 @@
    Commercial extensions can add Prometheus export, historical trending, etc."
   (:require [proximum.vectors :as vectors]
             [proximum.protocols :as p])
-  (:import [proximum.internal PersistentEdgeStore]))
+  (:import [proximum.internal PersistentEdgeIndex]))
 
 ;; Default compaction threshold (10% deleted)
 (def ^:dynamic *compaction-threshold* 0.10)
@@ -42,7 +42,7 @@
                           0.0)
          edge-count (p/edge-count idx)
          capacity (p/capacity idx)
-         ^PersistentEdgeStore pes (p/edge-storage idx)]
+         ^PersistentEdgeIndex pes (p/edge-storage idx)]
      {:vector-count vector-count
       :deleted-count deleted-count
       :live-count live-count
@@ -83,7 +83,7 @@
   "Get cache hit ratio for storage-backed indices.
    Returns nil for in-memory indices with no cache activity."
   [idx]
-  (let [^PersistentEdgeStore pes (p/edge-storage idx)
+  (let [^PersistentEdgeIndex pes (p/edge-storage idx)
         hits (.getCacheHits pes)
         misses (.getCacheMisses pes)
         total (+ hits misses)]

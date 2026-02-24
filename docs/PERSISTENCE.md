@@ -15,17 +15,17 @@ The persistence layer consists of three main components:
 
 | Component | Purpose | Storage |
 |-----------|---------|---------|
-| **PersistentEdgeStore (PES)** | HNSW graph edges | Chunked int arrays |
+| **PersistentEdgeIndex (PES)** | HNSW graph edges | Chunked int arrays |
 | **VectorStorage** | Raw vector data | Memory-mapped file |
 | **PersistentSortedSet (PSS)** | Metadata & external IDs | Hitchhiker tree |
 
-This document focuses on **PersistentEdgeStore**, the most complex component.
+This document focuses on **PersistentEdgeIndex**, the most complex component.
 
 ---
 
-## PersistentEdgeStore (PES)
+## PersistentEdgeIndex (PES)
 
-`PersistentEdgeStore` manages the HNSW graph structure - the neighbor lists for each node at each layer. It's implemented in Java for performance (`src-java/proximum/internal/PersistentEdgeStore.java`).
+`PersistentEdgeIndex` manages the HNSW graph structure - the neighbor lists for each node at each layer. It's implemented in Java for performance (`src-java/proximum/internal/PersistentEdgeIndex.java`).
 
 ### Memory Layout
 
@@ -83,7 +83,7 @@ The chunk array itself is also cloned (shallow copy), but unchanged chunks are s
 `fork()` creates a new PES that shares all structure with the original:
 
 ```java
-public PersistentEdgeStore fork() {
+public PersistentEdgeIndex fork() {
     // Clone the chunk index arrays (shallow - O(numChunks))
     int[][] newLayer0 = oldLayer0.clone();
     int[][][] newUpper = /* shallow clone each layer */;
@@ -94,7 +94,7 @@ public PersistentEdgeStore fork() {
     // Clone deletion bitset
     long[] newDeleted = oldDeleted.clone();
 
-    return new PersistentEdgeStore(..., newLayer0, newUpper, ...);
+    return new PersistentEdgeIndex(..., newLayer0, newUpper, ...);
 }
 ```
 
@@ -505,7 +505,7 @@ PSS nodes are stored in Konserve via `CachedStorage`:
 (deftype HnswIndex [
   ;; Hot-path fields (direct access for performance)
   vectors                    ; VectorStorage
-  ^PersistentEdgeStore pes-edges
+  ^PersistentEdgeIndex pes-edges
   ^int dim
   ^int distance-type
 
