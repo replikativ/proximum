@@ -10,7 +10,6 @@ and the legal requirements for doing so.
 3. Make your changes
 4. Sign your commits: `git commit -s -m "Description"`
 5. Open a pull request
-6. Sign the CLA (first-time contributors only)
 
 ## Developer Certificate of Origin (DCO)
 
@@ -33,24 +32,6 @@ git config --global user.email "your.email@example.com"
 
 The DCO is a lightweight way to certify that you wrote or have the right to submit the code.
 See [developercertificate.org](https://developercertificate.org) for the full text.
-
-## Contributor License Agreement (CLA)
-
-First-time contributors will be asked to sign our CLA via the CLA Assistant bot.
-This is a one-time requirement.
-
-**Why a CLA?**
-
-The CLA grants replikativ the right to:
-- Distribute your contributions under Apache-2.0 (the project's open source license)
-- Offer your contributions under commercial license terms (for customers who prefer them)
-
-**Our commitment to you:**
-- The project will **always** remain available under an OSI-approved open source license
-- Commercial licensing is **in addition to**, not instead of, the open source license
-- Both versions receive the same contributions
-
-See [docs/LICENSING_AND_CLA.md](docs/LICENSING_AND_CLA.md) for full details.
 
 ## Code Guidelines
 
@@ -96,5 +77,4 @@ Add tests for new functionality when possible.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under Apache-2.0
-and may be included in commercially licensed distributions per the CLA.
+By contributing, you agree that your contributions will be licensed under Apache-2.0.
