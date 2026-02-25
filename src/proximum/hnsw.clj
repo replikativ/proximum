@@ -8,7 +8,7 @@
    - HNSW-specific operations (bulk-insert!, hnsw-search)
 
    Edge Storage:
-   - PersistentEdgeStore for Java-based parallel insert with O(1) fork
+   - PersistentEdgeIndex for Java-based parallel insert with O(1) fork
 
    Core functions:
    - create-edge-store: Create edge storage
@@ -25,7 +25,7 @@
             [org.replikativ.persistent-sorted-set :as pss]
             [konserve.core :as k]
             [clojure.core.async :as a])
-  (:import [proximum.internal PersistentEdgeStore HnswInsert HnswSearch ArrayBitSet]
+  (:import [proximum.internal PersistentEdgeIndex HnswInsert HnswSearch ArrayBitSet]
            [java.lang.foreign MemorySegment]))
 
 ;; -----------------------------------------------------------------------------
@@ -36,7 +36,7 @@
 ;;
 ;; State map contains:
 ;;   :vectors        - VectorStore (konserve + mmap)
-;;   :pes-edges      - PersistentEdgeStore (Java, fast CoW)
+;;   :pes-edges      - PersistentEdgeIndex (Java, fast CoW)
 ;;   :metadata       - PSS: {node-id -> metadata-map}
 ;;   :external-id-index - PSS: {external-id -> node-id}
 ;;   :M              - max neighbors per node (upper layers)
@@ -101,7 +101,7 @@
 
 (deftype HnswIndex [;; Hot-path fields (direct access for performance)
                     vectors                      ; VectorStore
-                    ^PersistentEdgeStore pes-edges ; PersistentEdgeStore
+                    ^PersistentEdgeIndex pes-edges ; PersistentEdgeIndex
                     ^int dim                     ; dimension
                     ^int distance-type           ; 0=euclidean, 1=cosine, 2=inner-product
 
@@ -467,10 +467,10 @@
   (k/create-store (dissoc store-config :opts) {:sync? true}))
 
 ;; -----------------------------------------------------------------------------
-;; PersistentEdgeStore Integration
+;; PersistentEdgeIndex Integration
 
 (defn create-edge-store
-  "Create a PersistentEdgeStore for an index.
+  "Create a PersistentEdgeIndex for an index.
 
    Uses chunked CoW arrays:
    - Layer 0: Dense chunks for structural sharing
@@ -483,14 +483,14 @@
      M0          - Max neighbors for layer 0 (typically 2*M)
 
    Returns:
-     PersistentEdgeStore instance"
-  ^PersistentEdgeStore [max-nodes max-level M M0]
-  (PersistentEdgeStore. (int max-nodes) (int max-level) (int M) (int M0)))
+     PersistentEdgeIndex instance"
+  ^PersistentEdgeIndex [max-nodes max-level M M0]
+  (PersistentEdgeIndex. (int max-nodes) (int max-level) (int M) (int M0)))
 
 (defn fork-edges
-  "Create a fork of a PersistentEdgeStore.
+  "Create a fork of a PersistentEdgeIndex.
    The fork shares structure with the original but can diverge."
-  ^PersistentEdgeStore [^PersistentEdgeStore edges]
+  ^PersistentEdgeIndex [^PersistentEdgeIndex edges]
   (.fork edges))
 
 ;; Distance type constants matching Java HnswSearch
@@ -508,10 +508,10 @@
     DISTANCE_EUCLIDEAN))
 
 (defn bulk-insert!
-  "Insert multiple vectors in parallel using PersistentEdgeStore.
+  "Insert multiple vectors in parallel using PersistentEdgeIndex.
 
    This implementation uses:
-   - PersistentEdgeStore for chunked CoW edge storage
+   - PersistentEdgeIndex for chunked CoW edge storage
    - Transient mode during bulk insert (mutates in place)
    - ForkJoinPool for parallel execution
    - Diversity heuristic for neighbor selection
@@ -519,18 +519,18 @@
 
    Args:
      index         - HnswIndex (will use its vector store)
-     edges         - PersistentEdgeStore to insert into
+     edges         - PersistentEdgeIndex to insert into
      vectors       - Collection of vectors to insert
      num-threads   - Number of threads (default: available processors)
      distance-type - Optional: :euclidean (default), :cosine, :inner-product
 
    Returns:
-     PersistentEdgeStore with all vectors inserted"
+     PersistentEdgeIndex with all vectors inserted"
   ([index edges vectors]
    (bulk-insert! index edges vectors (.availableProcessors (Runtime/getRuntime))))
   ([index edges vectors num-threads]
    (bulk-insert! index edges vectors num-threads :euclidean))
-  ([index ^PersistentEdgeStore edges vectors num-threads distance-type]
+  ([index ^PersistentEdgeIndex edges vectors num-threads distance-type]
    (let [state (.-state index)
          {:keys [M ef-construction max-levels]} state
          vectors-store (.-vectors index)
@@ -577,13 +577,13 @@
      edges)))
 
 (defn hnsw-search
-  "Search for k nearest neighbors using PersistentEdgeStore.
+  "Search for k nearest neighbors using PersistentEdgeIndex.
 
    Lock-free search with SIMD distance computation.
 
    Args:
      index     - HnswIndex (for vector store)
-     edges     - PersistentEdgeStore containing the graph
+     edges     - PersistentEdgeIndex containing the graph
      query     - Query vector
      k         - Number of results
      ef        - Search beam width (should be >= k)
@@ -593,7 +593,7 @@
      Seq of {:id node-id, :distance distance}"
   ([index edges query k ef]
    (hnsw-search index edges query k ef :euclidean))
-  ([index ^PersistentEdgeStore edges query k ef distance-type]
+  ([index ^PersistentEdgeIndex edges query k ef distance-type]
    (let [vectors-store (.-vectors index)
          ^MemorySegment seg (vectors/get-segment vectors-store)
          dim (.-dim index)
@@ -636,7 +636,7 @@
                           :current-count cnt
                           :hint "Use (create-index {:type :hnsw :dim dim :capacity larger-value ...})"})))
        ;; Fork PES for immutable semantics - new PES is private to this operation
-       (let [new-pes (.fork ^PersistentEdgeStore pes-edges)
+       (let [new-pes (.fork ^PersistentEdgeIndex pes-edges)
              float-arr (ensure-float-array vector)
              _ (when use-cosine?
                  (HnswInsert/normalizeVector float-arr))
@@ -679,7 +679,7 @@
                           :needed (+ cnt n)
                           :hint "Use (create-index {:type :hnsw :dim dim :capacity larger-value ...})"})))
        ;; Fork PES for immutable semantics - new PES is private to this operation
-       (let [new-pes (.fork ^PersistentEdgeStore pes-edges)
+       (let [new-pes (.fork ^PersistentEdgeIndex pes-edges)
              float-vecs (into-array (map ensure-float-array vecs))
              _ (when use-cosine?
                  (HnswInsert/normalizeVectors float-vecs))
@@ -796,7 +796,7 @@
           {:keys [metadata external-id-index M M0 deleted-count]} state
           ^MemorySegment seg (vectors/get-segment vectors)
           ;; Fork PES for immutable semantics - new PES is private to this operation
-          new-pes (.fork ^PersistentEdgeStore pes-edges)
+          new-pes (.fork ^PersistentEdgeIndex pes-edges)
           ;; HnswInsert/delete handles transient mode internally
           _ (HnswInsert/delete seg new-pes (int id) dim (int M) (int M0) distance-type)
           old-meta (meta/lookup-metadata metadata id)
@@ -834,7 +834,7 @@
 (extend-type HnswIndex
   p/IndexLifecycle
   (fork [idx]
-    (let [forked-pes (.fork ^PersistentEdgeStore (.-pes-edges idx))]
+    (let [forked-pes (.fork ^PersistentEdgeIndex (.-pes-edges idx))]
       ;; All fields are already plain values - just replace pes-edges
       ;; address-map, vector-count, deleted-count, commit-hash are copied by assoc
       ;; Preserve commit-id since fork doesn't change content
@@ -879,7 +879,7 @@
 
           ;; Clear dirty
           (when edge-store
-            (.clearDirty ^PersistentEdgeStore pes))
+            (.clearDirty ^PersistentEdgeIndex pes))
 
           ;; Return updated index with new address-map
           (update-hnsw-index idx {:address-map new-address-map
@@ -976,7 +976,7 @@
 
              ;; Clear dirty edges
                                (when edge-store
-                                 (.clearDirty ^PersistentEdgeStore pes))
+                                 (.clearDirty ^PersistentEdgeIndex pes))
 
              ;; 7. Store all PSS structures and create commit
                                (if-let [store (:storage state)]
@@ -1095,14 +1095,14 @@
 (extend-type HnswIndex
   p/Snapshotable
   (snapshot-graph-state [idx]
-    (let [^PersistentEdgeStore pes (.-pes-edges idx)]
+    (let [^PersistentEdgeIndex pes (.-pes-edges idx)]
       {:entrypoint (.getEntrypoint pes)
        :max-level (.getCurrentMaxLevel pes)
        :deleted-nodes-bitset (vec (.getDeletedNodesBitset pes))}))
 
   p/Forkable
   (fork-graph-storage [idx]
-    (.fork ^PersistentEdgeStore (.-pes-edges idx)))
+    (.fork ^PersistentEdgeIndex (.-pes-edges idx)))
 
   (fork-vector-storage [idx branch-name]
     (let [state (.-state idx)
@@ -1141,13 +1141,13 @@
 
   p/GraphMetrics
   (edge-count [idx]
-    (.countEdges ^PersistentEdgeStore (.-pes-edges idx)))
+    (.countEdges ^PersistentEdgeIndex (.-pes-edges idx)))
 
   (graph-entrypoint [idx]
-    (.getEntrypoint ^PersistentEdgeStore (.-pes-edges idx)))
+    (.getEntrypoint ^PersistentEdgeIndex (.-pes-edges idx)))
 
   (graph-max-level [idx]
-    (.getCurrentMaxLevel ^PersistentEdgeStore (.-pes-edges idx)))
+    (.getCurrentMaxLevel ^PersistentEdgeIndex (.-pes-edges idx)))
 
   (expected-connectivity [idx]
     (:M (.-state idx))))
@@ -1209,7 +1209,7 @@
         meta-pss (meta/create-metadata-pss pss-store)
         external-id-pss (meta/create-external-id-pss pss-store)
         vs (vectors/create-store* base-store dim chunk-size capacity actual-mmap-path crypto-hash?)
-        pes (PersistentEdgeStore. (int capacity) (int max-level-int) (int M) (int M0))
+        pes (PersistentEdgeIndex. (int capacity) (int max-level-int) (int M) (int M0))
         edge-store base-store]
     (make-hnsw-index
      {:vectors vs
@@ -1287,7 +1287,7 @@
 
         ;; Create PES and switch to transient mode for initialization
         max-level-int (or max-level 16)
-        pes (PersistentEdgeStore. (int max-nodes) (int max-level-int) (int M) (int M0))
+        pes (PersistentEdgeIndex. (int max-nodes) (int max-level-int) (int M) (int M0))
         _ (.asTransient pes)  ;; Enable mutation for initialization
         _ (when entrypoint
             (.setEntrypoint pes (int entrypoint)))

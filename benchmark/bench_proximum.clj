@@ -14,7 +14,7 @@
             [clojure.core.async :as a])
   (:import [java.nio ByteBuffer ByteOrder]
            [java.io RandomAccessFile File]
-           [proximum.internal PersistentEdgeStore]))
+           [proximum.internal PersistentEdgeIndex]))
 
 ;; -----------------------------------------------------------------------------
 ;; Memory utilities
@@ -30,7 +30,7 @@
 
 (defn get-storage-size-mb
   "Calculate storage size: vectors (mmap) + edges."
-  [n-vectors dim ^PersistentEdgeStore pes]
+  [n-vectors dim ^PersistentEdgeIndex pes]
   (let [vector-bytes (* n-vectors dim 4)  ; float32
         edge-bytes (.getStorageBytes pes)]
     {:vector_storage_mb (/ vector-bytes 1024.0 1024.0)
@@ -123,7 +123,7 @@
 ;; Main benchmark
 
 (defn run-benchmark
-  "Benchmark using full proximum API with PersistentEdgeStore."
+  "Benchmark using full proximum API with PersistentEdgeIndex."
   [{:keys [dataset M ef-construction ef-search k num-threads distance]
     :or {distance :euclidean}}]
   (binding [*out* *err*]
@@ -168,7 +168,7 @@
               start (System/nanoTime)
               idx2 (pv/insert-batch idx vectors-data external-ids {:parallelism num-threads})
               insert-time (/ (- (System/nanoTime) start) 1e9)
-              ^PersistentEdgeStore pes (p/edge-storage idx2)]
+              ^PersistentEdgeIndex pes (p/edge-storage idx2)]
 
           (binding [*out* *err*]
             (println (format "  Insert: %.2fs (%.0f vec/sec)"

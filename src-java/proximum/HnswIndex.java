@@ -5,7 +5,7 @@ import java.nio.file.Path;
 
 import proximum.internal.HnswInsert;
 import proximum.internal.HnswSearch;
-import proximum.internal.PersistentEdgeStore;
+import proximum.internal.PersistentEdgeIndex;
 
 /**
  * High-performance HNSW index for approximumimate nearest neighbor search.
@@ -46,7 +46,7 @@ import proximum.internal.PersistentEdgeStore;
 public final class HnswIndex {
 
     private final VectorStorage vectors;
-    private final PersistentEdgeStore edges;
+    private final PersistentEdgeIndex edges;
     private final int dim;
     private final int M;
     private final int M0;
@@ -81,7 +81,7 @@ public final class HnswIndex {
     public static HnswIndex create(Path path, int dim, int capacity, int M, int efConstruction, int maxLevel) {
         Path vectorPath = path.resolve("vectors.mmap");
         MmapVectorStorage vectors = new MmapVectorStorage(vectorPath, dim, capacity);
-        PersistentEdgeStore edges = new PersistentEdgeStore(capacity, maxLevel, M, 2 * M);
+        PersistentEdgeIndex edges = new PersistentEdgeIndex(capacity, maxLevel, M, 2 * M);
         return new HnswIndex(vectors, edges, dim, M, 2 * M, efConstruction, maxLevel);
     }
 
@@ -103,12 +103,12 @@ public final class HnswIndex {
     public static HnswIndex create(VectorStorage vectors, int M, int efConstruction, int maxLevel) {
         int capacity = vectors.getCapacity();
         int dim = vectors.getDim();
-        PersistentEdgeStore edges = new PersistentEdgeStore(capacity, maxLevel, M, 2 * M);
+        PersistentEdgeIndex edges = new PersistentEdgeIndex(capacity, maxLevel, M, 2 * M);
         return new HnswIndex(vectors, edges, dim, M, 2 * M, efConstruction, maxLevel);
     }
 
     // Private constructor
-    private HnswIndex(VectorStorage vectors, PersistentEdgeStore edges,
+    private HnswIndex(VectorStorage vectors, PersistentEdgeIndex edges,
                       int dim, int M, int M0, int efConstruction, int maxLevel) {
         this.vectors = vectors;
         this.edges = edges;
@@ -312,7 +312,7 @@ public final class HnswIndex {
      * @return forked index
      */
     public HnswIndex fork() {
-        PersistentEdgeStore forkedEdges = edges.fork();
+        PersistentEdgeIndex forkedEdges = edges.fork();
         return new HnswIndex(vectors, forkedEdges, dim, M, M0, efConstruction, maxLevel);
     }
 

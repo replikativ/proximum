@@ -10,7 +10,7 @@ import java.util.Arrays;
 import java.util.Set;
 
 /**
- * Persistent edge store with copy-on-write semantics for HNSW graphs.
+ * Persistent edge index with copy-on-write semantics for HNSW graphs.
  *
  * <h2>Memory Layout</h2>
  * <p>Unified chunking for all layers:</p>
@@ -49,7 +49,7 @@ import java.util.Set;
  *
  * <p><b>Internal API</b> - subject to change without notice.</p>
  */
-public final class PersistentEdgeStore {
+public final class PersistentEdgeIndex {
 
     // Chunk size for all layers (power of 2 for fast indexing)
     public static final int CHUNK_SIZE = 1024;
@@ -120,19 +120,19 @@ public final class PersistentEdgeStore {
     private final AtomicReference<long[]> deletedNodes;  // Bitset for deleted nodes
 
     /**
-     * Create a new empty edge store (in-memory mode).
+     * Create a new empty edge index (in-memory mode).
      */
-    public PersistentEdgeStore(int maxNodes, int maxLevel, int M, int M0) {
+    public PersistentEdgeIndex(int maxNodes, int maxLevel, int M, int M0) {
         this(maxNodes, maxLevel, M, M0, null);
     }
 
     /**
-     * Create a new empty edge store with optional storage backend.
+     * Create a new empty edge index with optional storage backend.
      *
      * @param storage Storage backend for lazy loading (null = in-memory only)
      */
     @SuppressWarnings("unchecked")
-    public PersistentEdgeStore(int maxNodes, int maxLevel, int M, int M0, ChunkStorage storage) {
+    public PersistentEdgeIndex(int maxNodes, int maxLevel, int M, int M0, ChunkStorage storage) {
         this.maxNodes = maxNodes;
         this.maxLevel = maxLevel;
         this.M = M;
@@ -177,7 +177,7 @@ public final class PersistentEdgeStore {
     /**
      * Private constructor for forking.
      */
-    private PersistentEdgeStore(
+    private PersistentEdgeIndex(
             int maxNodes, int maxLevel, int M, int M0,
             int slotsPerNode, int slotsPerNodeUpper, int numChunks,
             int[][] layer0Chunks, int[][][] upperLayerChunks,
@@ -239,7 +239,7 @@ public final class PersistentEdgeStore {
      * Switch to transient mode for bulk mutations.
      * Mutations modify in place without copying.
      */
-    public PersistentEdgeStore asTransient() {
+    public PersistentEdgeIndex asTransient() {
         if (!edit.compareAndSet(false, true)) {
             throw new IllegalStateException("Already in transient mode");
         }
@@ -249,7 +249,7 @@ public final class PersistentEdgeStore {
     /**
      * Switch to persistent mode, sealing for immutable sharing.
      */
-    public PersistentEdgeStore asPersistent() {
+    public PersistentEdgeIndex asPersistent() {
         if (!edit.compareAndSet(true, false)) {
             throw new IllegalStateException("Not in transient mode");
         }
@@ -282,7 +282,7 @@ public final class PersistentEdgeStore {
      * @param transient_ true to enable transient mode (no COW), false for persistent mode (COW enabled)
      * @return this for chaining
      */
-    public PersistentEdgeStore setTransient(boolean transient_) {
+    public PersistentEdgeIndex setTransient(boolean transient_) {
         edit.set(transient_);
         return this;
     }
@@ -295,7 +295,7 @@ public final class PersistentEdgeStore {
      * assign chunks without affecting the original. Individual chunks are
      * still shared until modified (CoW happens at chunk level).
      */
-    public PersistentEdgeStore fork() {
+    public PersistentEdgeIndex fork() {
         // Shallow clone layer0 chunks array
         int[][] oldLayer0 = layer0Chunks.get();
         int[][] newLayer0 = oldLayer0.clone();
@@ -328,7 +328,7 @@ public final class PersistentEdgeStore {
         long[] oldDeleted = deletedNodes.get();
         long[] newDeleted = oldDeleted != null ? oldDeleted.clone() : null;
 
-        return new PersistentEdgeStore(
+        return new PersistentEdgeIndex(
             maxNodes, maxLevel, M, M0,
             slotsPerNode, slotsPerNodeUpper, numChunks,
             newLayer0, newUpper,

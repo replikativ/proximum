@@ -6,7 +6,7 @@
             [clojure.set :as set]
             [clojure.core.async :as a])
   (:import [java.io File]
-           [proximum.internal PersistentEdgeStore Distance]))
+           [proximum.internal PersistentEdgeIndex Distance]))
 
 (def ^:dynamic *store-id* nil)
 
@@ -108,7 +108,7 @@
           (let [idx2 (core/insert idx (random-vec 32) 0)]
             (is (= 1 (core/count-vectors idx2)))
             ;; Check PES has an entrypoint
-            (is (>= (.getEntrypoint ^PersistentEdgeStore (p/edge-storage idx2)) 0))
+            (is (>= (.getEntrypoint ^PersistentEdgeIndex (p/edge-storage idx2)) 0))
 
             ;; Insert more with sequential IDs
             (let [idx3 (reduce (fn [i n] (core/insert i (random-vec 32) (inc n)))
@@ -275,12 +275,12 @@
               idx-fork2 (core/insert idx-fork new-vec "fork-new" {:source :fork-insert})]
 
           ;; Original edge count unchanged
-          (is (= (.countEdges ^PersistentEdgeStore (p/edge-storage idx2))
-                 (.countEdges ^PersistentEdgeStore (p/edge-storage idx2))))
+          (is (= (.countEdges ^PersistentEdgeIndex (p/edge-storage idx2))
+                 (.countEdges ^PersistentEdgeIndex (p/edge-storage idx2))))
 
           ;; Fork has more edges
-          (is (> (.countEdges ^PersistentEdgeStore (p/edge-storage idx-fork2))
-                 (.countEdges ^PersistentEdgeStore (p/edge-storage idx2))))
+          (is (> (.countEdges ^PersistentEdgeIndex (p/edge-storage idx-fork2))
+                 (.countEdges ^PersistentEdgeIndex (p/edge-storage idx2))))
 
           ;; Searching the fork finds the new vector
           (let [results (core/search idx-fork2 new-vec 5 {:ef 50})]
@@ -519,12 +519,12 @@
               forked2 (core/insert forked new-vec "new-in-fork")]
 
           ;; Original edge count unchanged
-          (is (= (.countEdges ^PersistentEdgeStore (p/edge-storage idx2))
-                 (.countEdges ^PersistentEdgeStore (p/edge-storage idx2))))
+          (is (= (.countEdges ^PersistentEdgeIndex (p/edge-storage idx2))
+                 (.countEdges ^PersistentEdgeIndex (p/edge-storage idx2))))
 
           ;; Fork has more edges
-          (is (> (.countEdges ^PersistentEdgeStore (p/edge-storage forked2))
-                 (.countEdges ^PersistentEdgeStore (p/edge-storage idx2))))
+          (is (> (.countEdges ^PersistentEdgeIndex (p/edge-storage forked2))
+                 (.countEdges ^PersistentEdgeIndex (p/edge-storage idx2))))
 
           (a/<!! (core/close! idx2))))
 
@@ -570,8 +570,8 @@
               pes (p/edge-storage idx)]
 
           ;; Initially no dirty chunks
-          (is (not (.hasDirtyChunks ^PersistentEdgeStore pes)))
-          (is (= 0 (.countDirtyChunks ^PersistentEdgeStore pes)))
+          (is (not (.hasDirtyChunks ^PersistentEdgeIndex pes)))
+          (is (= 0 (.countDirtyChunks ^PersistentEdgeIndex pes)))
 
           ;; Insert two vectors (first has no edges, second creates edges)
           (let [idx2 (-> idx
@@ -579,16 +579,16 @@
                          (core/insert (random-vec 32) 1))
                 pes2 (p/edge-storage idx2)]
             ;; Now should have dirty chunks
-            (is (.hasDirtyChunks ^PersistentEdgeStore pes2))
-            (is (pos? (.countDirtyChunks ^PersistentEdgeStore pes2)))
+            (is (.hasDirtyChunks ^PersistentEdgeIndex pes2))
+            (is (pos? (.countDirtyChunks ^PersistentEdgeIndex pes2)))
 
             ;; Can get dirty chunk addresses
-            (let [dirty (.getDirtyChunks ^PersistentEdgeStore pes2)]
+            (let [dirty (.getDirtyChunks ^PersistentEdgeIndex pes2)]
               (is (pos? (count dirty))))
 
             ;; Clear dirty and verify
-            (.clearDirty ^PersistentEdgeStore pes2)
-            (is (not (.hasDirtyChunks ^PersistentEdgeStore pes2)))
+            (.clearDirty ^PersistentEdgeIndex pes2)
+            (is (not (.hasDirtyChunks ^PersistentEdgeIndex pes2)))
 
             (a/<!! (core/close! idx2)))))
 
@@ -605,12 +605,12 @@
               pes2 (p/edge-storage idx2)]
 
           ;; Original has dirty chunks after insert
-          (is (.hasDirtyChunks ^PersistentEdgeStore pes2))
+          (is (.hasDirtyChunks ^PersistentEdgeIndex pes2))
 
           ;; Fork should start clean
           (let [forked (core/fork idx2)
                 pes-forked (p/edge-storage forked)]
-            (is (not (.hasDirtyChunks ^PersistentEdgeStore pes-forked))
+            (is (not (.hasDirtyChunks ^PersistentEdgeIndex pes-forked))
                 "Forked PES should have empty dirty set"))
 
           (a/<!! (core/close! idx2))))
@@ -688,15 +688,15 @@
               pes (p/edge-storage idx2)]
 
           ;; Before flush, PES has dirty chunks
-          (is (.hasDirtyChunks ^PersistentEdgeStore pes))
-          (let [dirty-count (.countDirtyChunks ^PersistentEdgeStore pes)]
+          (is (.hasDirtyChunks ^PersistentEdgeIndex pes))
+          (let [dirty-count (.countDirtyChunks ^PersistentEdgeIndex pes)]
             (is (pos? dirty-count)))
 
           ;; Flush persists edges - returns updated index with new address-map
           (let [idx2 (a/<!! (core/flush! idx2))]
 
             ;; After flush, PES has no dirty chunks
-            (is (not (.hasDirtyChunks ^PersistentEdgeStore pes)))
+            (is (not (.hasDirtyChunks ^PersistentEdgeIndex pes)))
 
             ;; address-map should now have entries (plain value, no @ needed)
             (is (pos? (count (hnsw.i/address-map idx2)))))
@@ -718,8 +718,8 @@
           (let [idx2 (a/<!! (core/sync! idx2))]
 
             ;; Record edge count for comparison
-            (let [orig-edge-count (.countEdges ^PersistentEdgeStore (p/edge-storage idx2))
-                  orig-entrypoint (.getEntrypoint ^PersistentEdgeStore (p/edge-storage idx2))
+            (let [orig-edge-count (.countEdges ^PersistentEdgeIndex (p/edge-storage idx2))
+                  orig-entrypoint (.getEntrypoint ^PersistentEdgeIndex (p/edge-storage idx2))
                   query (random-vec 32)
                   orig-results (core/search idx2 query 10 {:ef 50})]
 
@@ -729,8 +729,8 @@
               (let [base (str storage-path "-load")
                     loaded (core/load (store-config-for base *store-id*)
                                       :mmap-dir (mmap-dir-for base))
-                    loaded-edge-count (.countEdges ^PersistentEdgeStore (p/edge-storage loaded))
-                    loaded-entrypoint (.getEntrypoint ^PersistentEdgeStore (p/edge-storage loaded))]
+                    loaded-edge-count (.countEdges ^PersistentEdgeIndex (p/edge-storage loaded))
+                    loaded-entrypoint (.getEntrypoint ^PersistentEdgeIndex (p/edge-storage loaded))]
 
                 ;; Edge count should match
                 (is (= orig-edge-count loaded-edge-count)
@@ -773,7 +773,7 @@
               query (random-vec 32)]
 
           ;; Verify deleted nodes are marked
-          (is (= 3 (.getDeletedCount ^PersistentEdgeStore (p/edge-storage idx3)))
+          (is (= 3 (.getDeletedCount ^PersistentEdgeIndex (p/edge-storage idx3)))
               "Should have 3 deleted nodes")
 
           ;; Search should not return deleted nodes
@@ -789,7 +789,7 @@
           (let [loaded (core/load (store-config-for storage-path *store-id*)
                                   :mmap-dir (mmap-dir-for storage-path))]
             ;; Deleted count should be restored
-            (is (= 3 (.getDeletedCount ^PersistentEdgeStore (p/edge-storage loaded)))
+            (is (= 3 (.getDeletedCount ^PersistentEdgeIndex (p/edge-storage loaded)))
                 "Loaded index should have same deleted count")
 
             ;; Search should still not return deleted nodes

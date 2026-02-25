@@ -4,7 +4,7 @@ import java.lang.foreign.MemorySegment;
 import org.replikativ.proximum.SearchOptions;
 
 /**
- * High-performance HNSW search using PersistentEdgeStore.
+ * High-performance HNSW search using PersistentEdgeIndex.
  *
  * Lock-free search with SIMD distance computation.
  *
@@ -35,7 +35,7 @@ public final class HnswSearch {
      * Search for k nearest neighbors (Euclidean distance).
      *
      * @param seg    MemorySegment for vector storage
-     * @param edges  PersistentEdgeStore for graph edges
+     * @param edges  PersistentEdgeIndex for graph edges
      * @param query  Query vector
      * @param dim    Vector dimensionality
      * @param k      Number of neighbors to return
@@ -44,7 +44,7 @@ public final class HnswSearch {
      */
     public static double[] search(
             MemorySegment seg,
-            PersistentEdgeStore edges,
+            PersistentEdgeIndex edges,
             float[] query,
             int dim,
             int k,
@@ -56,7 +56,7 @@ public final class HnswSearch {
      * Search for k nearest neighbors with configurable distance metric.
      *
      * @param seg          MemorySegment for vector storage
-     * @param edges        PersistentEdgeStore for graph edges
+     * @param edges        PersistentEdgeIndex for graph edges
      * @param query        Query vector
      * @param dim          Vector dimensionality
      * @param k            Number of neighbors to return
@@ -66,7 +66,7 @@ public final class HnswSearch {
      */
     public static double[] search(
             MemorySegment seg,
-            PersistentEdgeStore edges,
+            PersistentEdgeIndex edges,
             float[] query,
             int dim,
             int k,
@@ -96,7 +96,7 @@ public final class HnswSearch {
      */
     public static double[] search(
             MemorySegment seg,
-            PersistentEdgeStore edges,
+            PersistentEdgeIndex edges,
             float[] query,
             int dim,
             int k,
@@ -134,7 +134,7 @@ public final class HnswSearch {
      * respecting the filter.
      *
      * @param seg        MemorySegment for vector storage
-     * @param edges      PersistentEdgeStore for graph edges
+     * @param edges      PersistentEdgeIndex for graph edges
      * @param query      Query vector
      * @param dim        Vector dimensionality
      * @param k          Number of neighbors to return
@@ -144,7 +144,7 @@ public final class HnswSearch {
      */
     public static double[] searchFiltered(
             MemorySegment seg,
-            PersistentEdgeStore edges,
+            PersistentEdgeIndex edges,
             float[] query,
             int dim,
             int k,
@@ -158,7 +158,7 @@ public final class HnswSearch {
      */
     public static double[] searchFiltered(
             MemorySegment seg,
-            PersistentEdgeStore edges,
+            PersistentEdgeIndex edges,
             float[] query,
             int dim,
             int k,
@@ -193,7 +193,7 @@ public final class HnswSearch {
      */
     public static double[] searchFiltered(
             MemorySegment seg,
-            PersistentEdgeStore edges,
+            PersistentEdgeIndex edges,
             float[] query,
             int dim,
             int k,
@@ -234,7 +234,7 @@ public final class HnswSearch {
      */
     private static int searchLayerGreedy(
             MemorySegment seg,
-            PersistentEdgeStore edges,
+            PersistentEdgeIndex edges,
             float[] query,
             int dim,
             int entryPoint,
@@ -250,7 +250,7 @@ public final class HnswSearch {
 
             // Zero-copy neighbor iteration for layer 0
             if (layer == 0) {
-                int chunkIdx = current >> PersistentEdgeStore.CHUNK_SHIFT;
+                int chunkIdx = current >> PersistentEdgeIndex.CHUNK_SHIFT;
                 int[] chunk = edges.getLayer0Chunk(chunkIdx);
                 if (chunk == null) break;
 
@@ -365,7 +365,7 @@ public final class HnswSearch {
      */
     private static double[] searchLayerBeam(
             MemorySegment seg,
-            PersistentEdgeStore edges,
+            PersistentEdgeIndex edges,
             float[] query,
             int dim,
             int entryPoint,
@@ -453,7 +453,7 @@ public final class HnswSearch {
             int displacementsThisIteration = 0;
 
             // Expand neighbors - zero-copy access for layer 0
-            int chunkIdx = current >> PersistentEdgeStore.CHUNK_SHIFT;
+            int chunkIdx = current >> PersistentEdgeIndex.CHUNK_SHIFT;
             int[] chunk = edges.getLayer0Chunk(chunkIdx);
             if (chunk == null) continue;
 
@@ -527,7 +527,7 @@ public final class HnswSearch {
      */
     private static double[] searchLayerBeamFiltered(
             MemorySegment seg,
-            PersistentEdgeStore edges,
+            PersistentEdgeIndex edges,
             float[] query,
             int dim,
             int entryPoint,
@@ -618,7 +618,7 @@ public final class HnswSearch {
             int displacementsThisIteration = 0;
 
             // Expand neighbors - zero-copy access for layer 0
-            int chunkIdx = current >> PersistentEdgeStore.CHUNK_SHIFT;
+            int chunkIdx = current >> PersistentEdgeIndex.CHUNK_SHIFT;
             int[] chunk = edges.getLayer0Chunk(chunkIdx);
             if (chunk == null) continue;
 
