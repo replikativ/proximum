@@ -15,7 +15,7 @@ The persistence layer consists of three main components:
 
 | Component | Purpose | Storage |
 |-----------|---------|---------|
-| **PersistentEdgeIndex (PES)** | HNSW graph edges | Chunked int arrays |
+| **PersistentEdgeIndex (PEI)** | HNSW graph edges | Chunked int arrays |
 | **VectorStorage** | Raw vector data | Memory-mapped file |
 | **PersistentSortedSet (PSS)** | Metadata & external IDs | Hitchhiker tree |
 
@@ -23,7 +23,7 @@ This document focuses on **PersistentEdgeIndex**, the most complex component.
 
 ---
 
-## PersistentEdgeIndex (PES)
+## PersistentEdgeIndex (PEI)
 
 `PersistentEdgeIndex` manages the HNSW graph structure - the neighbor lists for each node at each layer. It's implemented in Java for performance (`src-java/proximum/internal/PersistentEdgeIndex.java`).
 
@@ -32,24 +32,24 @@ This document focuses on **PersistentEdgeIndex**, the most complex component.
 The graph is stored in **chunked arrays** for efficient structural sharing:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        CHUNK STRUCTURE                          │
-├─────────────────────────────────────────────────────────────────┤
-│ CHUNK_SIZE = 1024 nodes per chunk                               │
-│ Each node gets (M + 1) int slots: [count, neighbor0, ..., neighborM-1]
-│                                                                 │
-│ Layer 0:  slotsPerNode = M0 + 1  (typically M0 = 2*M)          │
-│ Layer 1+: slotsPerNode = M + 1                                  │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                            CHUNK STRUCTURE                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│ CHUNK_SIZE = 1024 nodes per chunk                                       │
+│ Each node gets (M + 1) int slots: [count, neighbor0, ..., neighborM-1]  │
+│                                                                         │
+│ Layer 0:  slotsPerNode = M0 + 1  (typically M0 = 2*M)                   │
+│ Layer 1+: slotsPerNode = M + 1                                          │
+└─────────────────────────────────────────────────────────────────────────┘
 
 Example with M=16, M0=32:
 
 Layer 0 chunk (1024 nodes × 33 slots × 4 bytes = 135 KB):
 ┌────────────────────────────────────────────────────────────┐
-│ Node 0: [count=5, n0, n1, n2, n3, n4, -, -, ..., -]       │
-│ Node 1: [count=12, n0, n1, n2, ..., n11, -, ..., -]       │
+│ Node 0: [count=5, n0, n1, n2, n3, n4, -, -, ..., -]        │
+│ Node 1: [count=12, n0, n1, n2, ..., n11, -, ..., -]        │
 │ ...                                                        │
-│ Node 1023: [count=8, n0, n1, ..., n7, -, ..., -]          │
+│ Node 1023: [count=8, n0, n1, ..., n7, -, ..., -]           │
 └────────────────────────────────────────────────────────────┘
 
 Upper layer chunks are smaller (M+1 slots) and allocated lazily.
@@ -68,11 +68,11 @@ BEFORE MODIFICATION:
 └─────────────┘     └─────────────┘
 
 AFTER MODIFYING NODE IN CHUNK 1:
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+┌─────────────┐     ┌─────────────┐     ┌──────────────┐
 │ chunks[0] ──────→ │  Chunk A    │ ←─────── chunks[0] │ (shared)
-│ chunks[1] ──────→ │  Chunk B'   │     │  Chunk B    │ ←── old, now unused
+│ chunks[1] ──────→ │  Chunk B'   │     │  Chunk B     │ ←── old, now unused
 │ chunks[2] ──────→ │  Chunk C    │ ←─────── chunks[2] │ (shared)
-└─────────────┘     └─────────────┘     └─────────────┘
+└─────────────┘     └─────────────┘     └──────────────┘
    NEW VERSION                             OLD VERSION
 ```
 
@@ -80,7 +80,7 @@ The chunk array itself is also cloned (shallow copy), but unchanged chunks are s
 
 ### Fork Operation
 
-`fork()` creates a new PES that shares all structure with the original:
+`fork()` creates a new PEI that shares all structure with the original:
 
 ```java
 public PersistentEdgeIndex fork() {
@@ -100,11 +100,11 @@ public PersistentEdgeIndex fork() {
 
 **Cost**: O(numChunks + maxLevel) - typically microseconds even for million-node graphs.
 
-After forking, both PES instances share the same chunk data until one writes. The `dirtyChunks` set tracks which chunks have been modified in the current session.
+After forking, both PEI instances share the same chunk data until one writes. The `dirtyChunks` set tracks which chunks have been modified in the current session.
 
 ### Transient vs Persistent Mode
 
-PES supports two modes for different use cases:
+PEI supports two modes for different use cases:
 
 | Mode | CoW Behavior | Use Case |
 |------|--------------|----------|
@@ -127,7 +127,7 @@ In transient mode:
 
 ### Thread Safety
 
-PES uses **striped locking** for concurrent insert:
+PEI uses **striped locking** for concurrent insert:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -137,7 +137,7 @@ PES uses **striped locking** for concurrent insert:
 │ Lock selection: stripedLocks[nodeId & 0x3FF]                    │
 │                                                                 │
 │ Benefits:                                                       │
-│ - Much less memory than per-node locks (50KB vs 50MB for 1M)   │
+│ - Much less memory than per-node locks (50KB vs 50MB for 1M)    │
 │ - Low contention: nodes in same chunk rarely lock same stripe   │
 │ - Allows parallel insert across different graph regions         │
 └─────────────────────────────────────────────────────────────────┘
@@ -147,7 +147,7 @@ Reads are **lock-free** - they see a consistent snapshot via the immutable chunk
 
 ### Soft Reference Memory Management
 
-For large indices, PES supports **lazy loading** with soft references:
+For large indices, PEI supports **lazy loading** with soft references:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -230,7 +230,7 @@ This enables **incremental persistence** - only changed chunks are written to st
 
 ### Storage Integration
 
-PES integrates with Konserve (the storage layer) through the `ChunkStorage` interface:
+PEI integrates with Konserve (the storage layer) through the `ChunkStorage` interface:
 
 ```java
 public interface ChunkStorage {
@@ -251,7 +251,7 @@ The actual persistence is handled in Clojure (`proximum.storage`), which:
 
 ## Key Invariants
 
-1. **Immutability**: Once a PES is in persistent mode, its visible state never changes
+1. **Immutability**: Once a PEI is in persistent mode, its visible state never changes
 2. **Structural Sharing**: Forks share unchanged chunks (same object identity)
 3. **CoW Isolation**: Writes never affect other versions or forks
 4. **Soft Ref Safety**: Writes resolve softified chunks before allocating new ones
@@ -285,18 +285,18 @@ Memory per 1M nodes (M=16, M0=32):
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    DUAL STORAGE MODEL                            │
+│                    DUAL STORAGE MODEL                           │
 ├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
+│                                                                 │
 │   KONSERVE (source of truth)      MMAP (runtime cache)          │
 │   ─────────────────────────       ────────────────────          │
 │   • Chunked vector storage        • Memory-mapped file          │
 │   • Async writes                  • Immediate writes            │
 │   • Supports S3, GCS, etc.        • SIMD-friendly layout        │
 │   • Structural sharing            • Fast reads for search       │
-│                                                                  │
+│                                                                 │
 │   On sync: mmap → Konserve        On load: Konserve → mmap      │
-│                                                                  │
+│                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -419,22 +419,22 @@ Proximum uses Tonsky's `persistent-sorted-set` library for metadata storage. PSS
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    PSS-BACKED METADATA                           │
+│                    PSS-BACKED METADATA                          │
 ├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│   METADATA PSS                    EXTERNAL-ID INDEX PSS          │
-│   ────────────                    ─────────────────────          │
-│   node-id → {:data {...}}         external-id → node-id          │
-│                                                                  │
-│   Sorted by: node-id (long)       Sorted by: external-id (any)   │
-│   Purpose: arbitrary metadata     Purpose: lookup internal ID    │
-│                                                                  │
-│   Example entries:                Example entries:               │
-│   {:node-id 0                     {:external-id "doc-123"        │
-│    :data {:label "cat"}}           :node-id 0}                   │
-│   {:node-id 1                     {:external-id "doc-456"        │
-│    :data {:label "dog"}}           :node-id 1}                   │
-│                                                                  │
+│                                                                 │
+│   METADATA PSS                    EXTERNAL-ID INDEX PSS         │
+│   ────────────                    ─────────────────────         │
+│   node-id → {:data {...}}         external-id → node-id         │
+│                                                                 │
+│   Sorted by: node-id (long)       Sorted by: external-id (any)  │
+│   Purpose: arbitrary metadata     Purpose: lookup internal ID   │
+│                                                                 │
+│   Example entries:                Example entries:              │
+│   {:node-id 0                     {:external-id "doc-123"       │
+│    :data {:label "cat"}}           :node-id 0}                  │
+│   {:node-id 1                     {:external-id "doc-456"       │
+│    :data {:label "dog"}}           :node-id 1}                  │
+│                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -491,13 +491,13 @@ PSS nodes are stored in Konserve via `CachedStorage`:
 ;; → PSS instance
 ```
 
-**Weak references** (`ref-type :weak`) allow the JVM to reclaim cached tree nodes under memory pressure, similar to PES soft references.
+**Weak references** (`ref-type :weak`) allow the JVM to reclaim cached tree nodes under memory pressure, similar to PEI soft references.
 
 ---
 
 ## HnswIndex: Bringing It All Together
 
-`HnswIndex` (`src/proximum/hnsw.clj`) is the unified index type that combines PES, VectorStorage, and PSS into a cohesive persistent data structure.
+`HnswIndex` (`src/proximum/hnsw.clj`) is the unified index type that combines PEI, VectorStorage, and PSS into a cohesive persistent data structure.
 
 ### Index State
 
@@ -534,16 +534,16 @@ Every mutation returns a **new HnswIndex**:
 
 ```clojure
 (p/insert idx vector {:external-id "doc-1"})
-;; 1. Fork PES (O(chunks))
+;; 1. Fork PEI (O(chunks))
 ;; 2. Append vector to VectorStorage
-;; 3. Insert into graph (mutates forked PES)
+;; 3. Insert into graph (mutates forked PEI)
 ;; 4. Update metadata PSS (CoW)
 ;; 5. Update external-id-index PSS (CoW)
 ;; 6. Return new HnswIndex with updated fields
 
 (p/delete idx internal-id)
-;; 1. Fork PES
-;; 2. Mark node deleted in PES (CoW bitset)
+;; 1. Fork PEI
+;; 2. Mark node deleted in PEI (CoW bitset)
 ;; 3. Update neighbor lists
 ;; 4. Remove from metadata and external-id-index
 ;; 5. Return new HnswIndex
@@ -555,28 +555,28 @@ Creating a branch involves forking all three storage layers:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                       FORK OPERATION                             │
+│                       FORK OPERATION                            │
 ├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  ORIGINAL INDEX                    FORKED INDEX                  │
-│  ──────────────                    ────────────                  │
-│                                                                  │
-│  PES ─────────→ chunks[]    ←───── PES' (fork)                  │
-│       (shared until write)                                       │
-│                                                                  │
+│                                                                 │
+│  ORIGINAL INDEX                    FORKED INDEX                 │
+│  ──────────────                    ────────────                 │
+│                                                                 │
+│  PEI ─────────→ chunks[]    ←───── PEI' (fork)                  │
+│       (shared until write)                                      │
+│                                                                 │
 │  VectorStorage → mmap file  ──cp── VectorStorage' (new mmap)    │
-│                  (reflink if supported)                          │
-│                                                                  │
+│                  (reflink if supported)                         │
+│                                                                 │
 │  Metadata PSS ───────────── shared ─────────────→ Metadata PSS' │
-│  (CoW tree nodes)                                                │
-│                                                                  │
+│  (CoW tree nodes)                                               │
+│                                                                 │
 │  External-ID PSS ────────── shared ─────────────→ Ext-ID PSS'   │
-│                                                                  │
+│                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 Cost breakdown:
-- **PES fork**: O(numChunks) - shallow clone arrays
+- **PEI fork**: O(numChunks) - shallow clone arrays
 - **VectorStorage**: O(1) with reflink, O(file-size) without
 - **PSS**: O(1) - just share the root, CoW on write
 
@@ -640,10 +640,10 @@ Loading an index from a commit reverses the process:
 ;; 1. Read :index/config from store
 ;; 2. Restore PSS instances from roots
 ;; 3. Load vector address-map, open VectorStorage
-;; 4. Create PES in transient mode
+;; 4. Create PEI in transient mode
 ;; 5. Load edge chunks from address-map
 ;; 6. Restore deleted state
-;; 7. Seal PES (asPersistent)
+;; 7. Seal PEI (asPersistent)
 ;; 8. Return HnswIndex
 ```
 
@@ -659,10 +659,10 @@ COMMIT 1                 COMMIT 2                 COMMIT 3
 ┌──────────┐             ┌──────────┐             ┌──────────┐
 │ Snapshot │             │ Snapshot │             │ Snapshot │
 ├──────────┤             ├──────────┤             ├──────────┤
-│ PSS Root ─────┐        │ PSS Root ─────┐        │ PSS Root ──────┐
-│ Edges Map     │        │ Edges Map     │        │ Edges Map      │
-│ Vectors Map   │        │ Vectors Map   │        │ Vectors Map    │
-└──────────┘    │        └──────────┘    │        └──────────┘     │
+│ PSS Root ─────┐        │ PSS Root ─────┐        │ PSS Root ───────┐
+│ Edges Map     │        │ Edges Map     │        │ Edges Map       │
+│ Vectors Map   │        │ Vectors Map   │        │ Vectors Map     │
+└──────────┘    │        └──────────┘    │        └──────────┘      │
                 │                        │                          │
                 ▼                        ▼                          ▼
          ┌───────────┐            ┌───────────┐              ┌───────────┐
@@ -697,19 +697,19 @@ Each commit only stores:
             ┌─────────────────┼─────────────────┐
             ▼                 ▼                 ▼
    ┌────────────────┐ ┌──────────────┐ ┌────────────────┐
-   │ VectorStorage  │ │     PES      │ │  PSS (×2)      │
+   │ VectorStorage  │ │     PEI      │ │  PSS (×2)      │
    │ (mmap+chunks)  │ │ (edge graph) │ │ (metadata+ids) │
    └───────┬────────┘ └──────┬───────┘ └───────┬────────┘
            │                 │                 │
            ▼                 ▼                 ▼
-       ┌──────────────────────────────────────────┐
+       ┌───────────────────────────────────────────┐
        │              KONSERVE                     │
        │  [:vectors :chunk uuid]                   │
        │  [:edges :chunk uuid]                     │
        │  [:pss :node uuid]                        │
        │  [:commits uuid]                          │
        │  [:branches :main]                        │
-       └──────────────────────────────────────────┘
+       └───────────────────────────────────────────┘
 ```
 
 All three storage layers converge at Konserve, which provides:
