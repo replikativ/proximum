@@ -596,33 +596,48 @@
 
 (defn verify-vectors-from-cold
   "Verify vectors from cold storage (konserve only, no mmap).
-   Reads all chunks using address map, recomputes their hashes, and verifies.
+   Reads all chunks using address map, recomputes their hashes, and
+   compares each to the expected storage-address.
+
+   Under :crypto-hash? the storage-address IS the content hash of the
+   chunk bytes (`(hash-chunk bytes)`), so any drift between recomputed
+   hash and storage-address means the on-disk bytes were tampered.
 
    Args:
      store       - Konserve store
-     address-map - Map of chunk-id -> storage-address (UUID)
+     address-map - Map of chunk-id -> storage-address (UUID under
+                   :crypto-hash?, opaque key otherwise)
      vector-count - Total vector count (for info only)
 
-   Returns {:valid? true, :chunks-verified N} or {:valid? false, :error ...}"
+   Returns {:valid? true, :chunks-verified N} or
+           {:valid? false, :error :chunk-not-found |
+                                  :chunk-content-tampered |
+                                  …}"
   [store address-map vector-count]
   (if (empty? address-map)
     {:valid? true :chunks-verified 0 :note "No chunks to verify"}
-    (let [;; Read and hash all chunks by their storage addresses
-          chunk-hashes (loop [cids (keys address-map)
+    (let [chunk-hashes (loop [cids (keys address-map)
                               hashes []]
                          (if (empty? cids)
                            hashes
                            (let [cid (first cids)
                                  storage-addr (get address-map cid)
                                  chunk-data (k/get store (chunk-key storage-addr) nil {:sync? true})]
-                             (if chunk-data
-                               (recur (rest cids) (conj hashes (hash-chunk chunk-data)))
-                               {:error :chunk-not-found :chunk-id cid :storage-addr storage-addr}))))]
+                             (cond
+                               (nil? chunk-data)
+                               {:error :chunk-not-found :chunk-id cid :storage-addr storage-addr}
+
+                               :else
+                               (let [recomputed (hash-chunk chunk-data)]
+                                 (if (and (instance? java.util.UUID storage-addr)
+                                          (not= storage-addr recomputed))
+                                   {:error :chunk-content-tampered
+                                    :chunk-id cid
+                                    :storage-addr storage-addr
+                                    :recomputed recomputed}
+                                   (recur (rest cids) (conj hashes recomputed))))))))]
       (if (map? chunk-hashes)
-        ;; Error case
-        {:valid? false :error (:error chunk-hashes)
-         :chunk-id (:chunk-id chunk-hashes) :storage-addr (:storage-addr chunk-hashes)}
-        ;; All chunks read successfully
+        (assoc chunk-hashes :valid? false)
         {:valid? true
          :chunks-verified (count chunk-hashes)
          :chunk-hashes chunk-hashes}))))
