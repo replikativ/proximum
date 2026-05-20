@@ -66,6 +66,12 @@ out/
 .\#*
 .projectile
 
+# Eclipse
+.project
+.classpath
+.settings/
+.factorypath
+
 # Vim
 *.swp
 *.swo
@@ -116,6 +122,7 @@ benchmark-env/
 data/
 /tmp/
 *.db
+!test/data/*.json
 *.sqlite
 
 CLAUDE.md
