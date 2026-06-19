@@ -16,7 +16,8 @@
             [konserve.utils :as k-utils]
             [konserve.serializers :refer [fressian-serializer]]
             [hasch.core :as hasch]
-            [org.replikativ.persistent-sorted-set :as pss])
+            [org.replikativ.persistent-sorted-set :as pss]
+            [org.replikativ.persistent-sorted-set.fressian :as pss-fress])
   (:import [org.fressian.handlers WriteHandler ReadHandler]
            [org.replikativ.persistent_sorted_set IStorage Leaf Branch ANode Settings PersistentSortedSet]
            [java.util List UUID]))
@@ -81,52 +82,46 @@
 (defn create-fressian-handlers
   "Create Fressian handlers for PersistentSortedSet nodes.
 
+   The Leaf/Branch NODE handlers are the canonical, shared ones from
+   `org.replikativ.persistent-sorted-set.fressian` (one node codec across datahike /
+   yggdrasil / proximum / stratum). Only the ROOT (PersistentSortedSet) handler is
+   proximum-specific — it carries the storage back-reference (`storage-atom`) for lazy
+   child loading and the flush invariant. Elements are fressian-native maps, so no
+   element handler is needed.
+
    The storage-atom is used for circular reference during deserialization -
    the PersistentSortedSet needs a reference to its storage to lazy-load nodes."
   [storage-atom]
-  (let [settings (map->settings {:branching-factor branching-factor})]
+  (let [settings (map->settings {:branching-factor branching-factor})
+        pss-rh   (pss-fress/read-handlers settings)]      ; pss/leaf + pss/branch
     {:read-handlers
-     {"proximum.PersistentSortedSet"
-      (reify ReadHandler
-        (read [_ reader _tag _component-count]
-          (let [{:keys [meta address count]} (.readObject reader)]
-            (PersistentSortedSet. meta nil address @storage-atom nil count settings 0))))
-      "proximum.PersistentSortedSet.Leaf"
-      (reify ReadHandler
-        (read [_ reader _tag _component-count]
-          (let [{:keys [keys]} (.readObject reader)]
-            (Leaf. ^List keys settings))))
-      "proximum.PersistentSortedSet.Branch"
-      (reify ReadHandler
-        (read [_ reader _tag _component-count]
-          (let [{:keys [keys level addresses]} (.readObject reader)]
-            (Branch. (int level) ^List keys ^List (seq addresses) settings))))}
+     (merge
+      {"proximum.PersistentSortedSet"
+       (reify ReadHandler
+         (read [_ reader _tag _component-count]
+           (let [{:keys [meta address count]} (.readObject reader)]
+             (PersistentSortedSet. meta nil address @storage-atom nil count settings 0))))}
+      pss-rh
+      ;; BACKWARDS COMPAT: pre-canonical proximum-tagged leaf/branch blobs read with the
+      ;; SAME canonical handlers — the old {:keys} / {:level :keys :addresses} form is a
+      ;; subset of the canonical map (missing subtree-count/measure/slots default fine).
+      ;; New writes use the pss/ tags; existing stores still read without migration.
+      {"proximum.PersistentSortedSet.Leaf"   (get pss-rh pss-fress/leaf-tag)
+       "proximum.PersistentSortedSet.Branch" (get pss-rh pss-fress/branch-tag)})
 
      :write-handlers
-     {PersistentSortedSet
-      {"proximum.PersistentSortedSet"
-       (reify WriteHandler
-         (write [_ writer pset]
-           (when (nil? (.-_address ^PersistentSortedSet pset))
-             (throw (ex-info "Must flush before serialization" {:type :must-be-flushed})))
-           (.writeTag writer "proximum.PersistentSortedSet" 1)
-           (.writeObject writer {:meta (meta pset)
-                                 :address (.-_address ^PersistentSortedSet pset)
-                                 :count (count pset)})))}
-      Leaf
-      {"proximum.PersistentSortedSet.Leaf"
-       (reify WriteHandler
-         (write [_ writer leaf]
-           (.writeTag writer "proximum.PersistentSortedSet.Leaf" 1)
-           (.writeObject writer {:keys (.keys ^Leaf leaf)})))}
-      Branch
-      {"proximum.PersistentSortedSet.Branch"
-       (reify WriteHandler
-         (write [_ writer node]
-           (.writeTag writer "proximum.PersistentSortedSet.Branch" 1)
-           (.writeObject writer {:level (.level ^Branch node)
-                                 :keys (.keys ^Branch node)
-                                 :addresses (.addresses ^Branch node)})))}}}))
+     (merge
+      {PersistentSortedSet
+       {"proximum.PersistentSortedSet"
+        (reify WriteHandler
+          (write [_ writer pset]
+            (when (nil? (.-_address ^PersistentSortedSet pset))
+              (throw (ex-info "Must flush before serialization" {:type :must-be-flushed})))
+            (.writeTag writer "proximum.PersistentSortedSet" 1)
+            (.writeObject writer {:meta (meta pset)
+                                  :address (.-_address ^PersistentSortedSet pset)
+                                  :count (count pset)})))}}
+      pss-fress/write-handlers)}))                       ; {Leaf {…} Branch {…}}
 
 ;;; Factory Functions
 

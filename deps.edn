@@ -2,7 +2,7 @@
 
  ;; For Maven Central deployment, use published dependencies:
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
-        org.replikativ/persistent-sorted-set {:mvn/version "0.4.119"}
+        org.replikativ/persistent-sorted-set {:local/root "../persistent-sorted-set"} ;; local: canonical .fressian ns (re-pin on release)
         ;; Use published Konserve version
         org.replikativ/konserve {:mvn/version "0.9.342"}
         org.replikativ/hasch {:mvn/version "0.3.96"}

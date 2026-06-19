@@ -4,7 +4,12 @@
             [proximum.storage :as storage]
             [konserve.core :as k]
             [konserve.memory :refer [new-mem-store]]
-            [clojure.core.async :as a]))
+            [clojure.data.fressian :as fress]
+            [clojure.core.async :as a])
+  (:import [org.fressian.handlers WriteHandler]
+           [org.replikativ.persistent_sorted_set Leaf Branch Settings]
+           [java.io ByteArrayOutputStream ByteArrayInputStream]
+           [java.util ArrayList]))
 
 (def ^:dynamic *store* nil)
 (def ^:dynamic *storage* nil)
@@ -16,6 +21,43 @@
       (f))))
 
 (use-fixtures :each with-store-fixture)
+
+;; ---------------------------------------------------------------------------
+
+(deftest backwards-compat-old-node-tags
+  (testing "pre-canonical proximum.*-tagged Leaf/Branch blobs still read via the
+            canonical handlers (dual-tag read) — no migration needed for old stores"
+    (let [settings (Settings. (int 512) nil)
+          leaf     (Leaf. (ArrayList. [{:k 1} {:k 2}]) settings)
+          branch   (Branch. (int 1) (ArrayList. [{:k 1}]) (ArrayList. [(random-uuid)]) settings)
+          ;; the OLD proximum write format: {:keys} / {:level :keys :addresses} under the
+          ;; legacy proximum.* tags (what existing stores on disk contain).
+          old-wh   {Leaf   {"proximum.PersistentSortedSet.Leaf"
+                            (reify WriteHandler
+                              (write [_ w l] (.writeTag w "proximum.PersistentSortedSet.Leaf" 1)
+                                (.writeObject w {:keys (.keys ^Leaf l)})))}
+                    Branch {"proximum.PersistentSortedSet.Branch"
+                            (reify WriteHandler
+                              (write [_ w b] (.writeTag w "proximum.PersistentSortedSet.Branch" 1)
+                                (.writeObject w {:level (.level ^Branch b) :keys (.keys ^Branch b)
+                                                 :addresses (.addresses ^Branch b)})))}}
+          ser      (fn [node]
+                     (let [out (ByteArrayOutputStream.)]
+                       (.writeObject (fress/create-writer out :handlers
+                                       (-> (merge fress/clojure-write-handlers old-wh)
+                                           fress/associative-lookup fress/inheritance-lookup)) node)
+                       (.toByteArray out)))
+          rh       (:read-handlers (storage/create-fressian-handlers (atom nil)))
+          deser    (fn [^bytes bs]
+                     (.readObject (fress/create-reader (ByteArrayInputStream. bs) :handlers
+                                    (-> (merge fress/clojure-read-handlers rh) fress/associative-lookup))))]
+      (let [leaf' (deser (ser leaf))]
+        (is (instance? Leaf leaf') "old Leaf tag → a Leaf")
+        (is (= [{:k 1} {:k 2}] (vec (.keys ^Leaf leaf'))) "old Leaf elements survive"))
+      (let [branch' (deser (ser branch))]
+        (is (instance? Branch branch') "old Branch tag → a Branch")
+        (is (= 1 (.level ^Branch branch')))
+        (is (= [{:k 1}] (vec (.keys ^Branch branch'))) "old Branch keys survive")))))
 
 ;; -----------------------------------------------------------------------------
 ;; Address PSS Creation and Basic Operations
