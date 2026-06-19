@@ -94,11 +94,13 @@
   [storage-atom]
   (let [settings  (map->settings {:branching-factor branching-factor})
         pss-rh    (pss-fress/read-handlers settings)              ; pss/leaf + pss/branch
-        ;; proximum has ONE local store, so storage resolves to a constant (the
-        ;; circular-ref atom); comparator defaults to nil (the address-map sets'
-        ;; ordering is stamped on descent).
-        root-read (pss-fress/root-read-handler {:settings settings
-                                                :resolve-storage (fn [_] @storage-atom)})]
+        ;; proximum has ONE local store, so the reconstruction SCOPE is fixed (storage =
+        ;; the circular-ref atom; comparator nil — the address-map sets' ordering is stamped
+        ;; on descent). No store-id / registry needed; pass the fixed scope directly.
+        root-read (pss-fress/root-read-handler
+                   {:resolve-scope (fn [_] {:storage     @storage-atom
+                                            :settings    settings
+                                            :resolve-cmp (constantly nil)})})]
     {:read-handlers
      (merge
       {pss-fress/set-tag root-read}                              ; pss/set
