@@ -92,15 +92,12 @@
    The storage-atom is used for circular reference during deserialization -
    the PersistentSortedSet needs a reference to its storage to lazy-load nodes."
   [storage-atom]
-  (let [settings  (map->settings {:branching-factor branching-factor})
-        pss-rh    (pss-fress/read-handlers settings)              ; pss/leaf + pss/branch
-        ;; proximum has ONE local store, so the reconstruction SCOPE is fixed (storage =
-        ;; the circular-ref atom; comparator nil — the address-map sets' ordering is stamped
-        ;; on descent). No store-id / registry needed; pass the fixed scope directly.
-        root-read (pss-fress/root-read-handler
-                   {:resolve-scope (fn [_] {:storage     @storage-atom
-                                            :settings    settings
-                                            :resolve-cmp (constantly nil)})})]
+  (let [pss-rh    (pss-fress/read-handlers {:default-bf branching-factor})  ; pss/leaf + pss/branch
+        ;; proximum has ONE local store ⇒ LEXICAL resolvers: storage is the circular-ref atom;
+        ;; comparator nil (address-map ordering re-stamped on descent); no measure. bf now
+        ;; self-describes per node from the blob (`:default-bf` only backstops pre-bf blobs).
+        root-read (pss-fress/root-read-handler {:resolve-storage (fn [_] @storage-atom)
+                                                :default-bf      branching-factor})]
     {:read-handlers
      (merge
       {pss-fress/set-tag root-read}                              ; pss/set
