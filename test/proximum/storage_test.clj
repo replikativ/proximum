@@ -44,13 +44,13 @@
           ser      (fn [node]
                      (let [out (ByteArrayOutputStream.)]
                        (.writeObject (fress/create-writer out :handlers
-                                       (-> (merge fress/clojure-write-handlers old-wh)
-                                           fress/associative-lookup fress/inheritance-lookup)) node)
+                                                          (-> (merge fress/clojure-write-handlers old-wh)
+                                                              fress/associative-lookup fress/inheritance-lookup)) node)
                        (.toByteArray out)))
           rh       (:read-handlers (storage/create-fressian-handlers (atom nil)))
           deser    (fn [^bytes bs]
                      (.readObject (fress/create-reader (ByteArrayInputStream. bs) :handlers
-                                    (-> (merge fress/clojure-read-handlers rh) fress/associative-lookup))))]
+                                                       (-> (merge fress/clojure-read-handlers rh) fress/associative-lookup))))]
       (let [leaf' (deser (ser leaf))]
         (is (instance? Leaf leaf') "old Leaf tag → a Leaf")
         (is (= [{:k 1} {:k 2}] (vec (.keys ^Leaf leaf'))) "old Leaf elements survive"))
