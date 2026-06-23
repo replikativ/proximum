@@ -109,8 +109,8 @@
                                 :branch new-branch))]
 
     ;; Write new branch snapshot under both commit-id and branch name
-    (k/assoc edge-store new-commit-id new-snapshot {:sync? true})
-    (k/assoc edge-store new-branch new-snapshot {:sync? true})
+    (k/assoc edge-store new-commit-id new-snapshot {:immutable? true} {:sync? true}) ; content-addressed commit
+    (k/assoc edge-store new-branch new-snapshot {:sync? true})                        ; mutable branch head
     (k/update edge-store :branches #(conj (or % #{}) new-branch) {:sync? true})
 
     ;; Assemble forked index using Forkable protocol

@@ -375,8 +375,8 @@
                        (hash-chunk chunk-bytes)
                        (generate-chunk-address))
             store-key (chunk-key new-addr)
-            ;; Store chunk - ASYNC
-            ch (k/assoc store store-key chunk-bytes)]
+            ;; Store chunk - ASYNC (content-addressed/COW write-once → immutable)
+            ch (k/assoc store store-key chunk-bytes {:immutable? true} {:sync? false})]
         ;; Track hash (merkle mode only) and update address map (always)
         (when crypto-hash?
           (swap! (:pending-chunk-hashes vs) conj new-addr))

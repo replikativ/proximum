@@ -178,10 +178,12 @@
     (when (seq pending)
       (if (k-utils/multi-key-capable? store)
         ;; Use multi-assoc for batch write - much faster with RocksDB WriteBatch
-        (k/multi-assoc store (into {} pending) {:sync? true})
+        ;; (all nodes are content-addressed write-once → immutable)
+        (let [batch (into {} pending)]
+          (k/multi-assoc store batch (k/uniform-meta batch {:immutable? true}) {:sync? true}))
         ;; Fall back to individual writes
         (doseq [[address node] pending]
-          (k/assoc store address node {:sync? true}))))
+          (k/assoc store address node {:immutable? true} {:sync? true}))))
     ;; Atomic removal: drop only the items we processed, keep any new ones
     (swap! (.-pending-writes storage) #(vec (drop (count pending) %)))
     nil))
