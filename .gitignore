@@ -119,3 +119,9 @@ data/
 *.sqlite
 
 CLAUDE.md
+
+# Eclipse / IDE metadata (should never be tracked)
+.settings/
+.classpath
+.project
+.factorypath

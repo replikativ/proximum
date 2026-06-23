@@ -130,8 +130,8 @@
       nil)
 
     (store [_ encoded-address chunk]
-      ;; Store chunk synchronously and return the address
-      (k/assoc store (chunk-key encoded-address) (chunk-to-bytes chunk) {:sync? true})
+      ;; Store chunk synchronously and return the address (content-addressed → immutable)
+      (k/assoc store (chunk-key encoded-address) (chunk-to-bytes chunk) {:immutable? true} {:sync? true})
       encoded-address)))
 
 ;; -----------------------------------------------------------------------------
@@ -166,7 +166,7 @@
                              storage-addr (if crypto-hash?
                                             (hash-chunk chunk-bytes)
                                             (generate-storage-address))]
-                         {:channels (conj channels (k/assoc store (chunk-key storage-addr) chunk-bytes))
+                         {:channels (conj channels (k/assoc store (chunk-key storage-addr) chunk-bytes {:immutable? true} {:sync? false}))
                           :new-addrs (assoc new-addrs pos storage-addr)
                           ;; In merkle mode, address IS the hash - no separate tracking needed
                           ;; but we keep chunk-hashes for commit hash computation

@@ -105,8 +105,8 @@
 
    Returns: nil"
   [store commit-id branch snapshot]
-  (k/assoc store commit-id snapshot {:sync? true})
-  (k/assoc store branch snapshot {:sync? true}))
+  (k/assoc store commit-id snapshot {:immutable? true} {:sync? true}) ; content-addressed commit
+  (k/assoc store branch snapshot {:sync? true}))                       ; mutable branch head
 
 (defn generate-commit-id
   "Generate a commit ID based on crypto-hash settings.

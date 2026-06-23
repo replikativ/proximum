@@ -16,7 +16,8 @@
             [konserve.utils :as k-utils]
             [konserve.serializers :refer [fressian-serializer]]
             [hasch.core :as hasch]
-            [org.replikativ.persistent-sorted-set :as pss])
+            [org.replikativ.persistent-sorted-set :as pss]
+            [org.replikativ.persistent-sorted-set.fressian :as pss-fress])
   (:import [org.fressian.handlers WriteHandler ReadHandler]
            [org.replikativ.persistent_sorted_set IStorage Leaf Branch ANode Settings PersistentSortedSet]
            [java.util List UUID]))
@@ -81,52 +82,38 @@
 (defn create-fressian-handlers
   "Create Fressian handlers for PersistentSortedSet nodes.
 
+   The Leaf/Branch NODE handlers are the canonical, shared ones from
+   `org.replikativ.persistent-sorted-set.fressian` (one node codec across datahike /
+   yggdrasil / proximum / stratum). Only the ROOT (PersistentSortedSet) handler is
+   proximum-specific — it carries the storage back-reference (`storage-atom`) for lazy
+   child loading and the flush invariant. Elements are fressian-native maps, so no
+   element handler is needed.
+
    The storage-atom is used for circular reference during deserialization -
    the PersistentSortedSet needs a reference to its storage to lazy-load nodes."
   [storage-atom]
-  (let [settings (map->settings {:branching-factor branching-factor})]
+  (let [pss-rh    (pss-fress/read-handlers {:default-bf branching-factor})  ; pss/leaf + pss/branch
+        ;; proximum has ONE local store ⇒ LEXICAL resolvers: storage is the circular-ref atom;
+        ;; comparator nil (address-map ordering re-stamped on descent); no measure. bf now
+        ;; self-describes per node from the blob (`:default-bf` only backstops pre-bf blobs).
+        root-read (pss-fress/root-read-handler {:resolve-storage (fn [_] @storage-atom)
+                                                :default-bf      branching-factor})]
     {:read-handlers
-     {"proximum.PersistentSortedSet"
-      (reify ReadHandler
-        (read [_ reader _tag _component-count]
-          (let [{:keys [meta address count]} (.readObject reader)]
-            (PersistentSortedSet. meta nil address @storage-atom nil count settings 0))))
-      "proximum.PersistentSortedSet.Leaf"
-      (reify ReadHandler
-        (read [_ reader _tag _component-count]
-          (let [{:keys [keys]} (.readObject reader)]
-            (Leaf. ^List keys settings))))
-      "proximum.PersistentSortedSet.Branch"
-      (reify ReadHandler
-        (read [_ reader _tag _component-count]
-          (let [{:keys [keys level addresses]} (.readObject reader)]
-            (Branch. (int level) ^List keys ^List (seq addresses) settings))))}
+     (merge
+      {pss-fress/set-tag root-read}                              ; pss/set
+      pss-rh
+      ;; BACKWARDS COMPAT: pre-canonical proximum.*-tagged root/leaf/branch blobs read
+      ;; with the SAME canonical handlers — the old {:meta :address :count} /
+      ;; {:keys} / {:level :keys :addresses} forms are subsets of the canonical maps.
+      ;; New writes use the pss/ tags; existing stores read without migration.
+      {"proximum.PersistentSortedSet"        root-read
+       "proximum.PersistentSortedSet.Leaf"   (get pss-rh pss-fress/leaf-tag)
+       "proximum.PersistentSortedSet.Branch" (get pss-rh pss-fress/branch-tag)})
 
      :write-handlers
-     {PersistentSortedSet
-      {"proximum.PersistentSortedSet"
-       (reify WriteHandler
-         (write [_ writer pset]
-           (when (nil? (.-_address ^PersistentSortedSet pset))
-             (throw (ex-info "Must flush before serialization" {:type :must-be-flushed})))
-           (.writeTag writer "proximum.PersistentSortedSet" 1)
-           (.writeObject writer {:meta (meta pset)
-                                 :address (.-_address ^PersistentSortedSet pset)
-                                 :count (count pset)})))}
-      Leaf
-      {"proximum.PersistentSortedSet.Leaf"
-       (reify WriteHandler
-         (write [_ writer leaf]
-           (.writeTag writer "proximum.PersistentSortedSet.Leaf" 1)
-           (.writeObject writer {:keys (.keys ^Leaf leaf)})))}
-      Branch
-      {"proximum.PersistentSortedSet.Branch"
-       (reify WriteHandler
-         (write [_ writer node]
-           (.writeTag writer "proximum.PersistentSortedSet.Branch" 1)
-           (.writeObject writer {:level (.level ^Branch node)
-                                 :keys (.keys ^Branch node)
-                                 :addresses (.addresses ^Branch node)})))}}}))
+     (merge
+      {PersistentSortedSet {pss-fress/set-tag (pss-fress/root-write-handler)}}  ; pss/set
+      pss-fress/write-handlers)}))                                ; pss/leaf + pss/branch
 
 ;;; Factory Functions
 
@@ -191,10 +178,12 @@
     (when (seq pending)
       (if (k-utils/multi-key-capable? store)
         ;; Use multi-assoc for batch write - much faster with RocksDB WriteBatch
-        (k/multi-assoc store (into {} pending) {:sync? true})
+        ;; (all nodes are content-addressed write-once → immutable)
+        (let [batch (into {} pending)]
+          (k/multi-assoc store batch (k/uniform-meta batch {:immutable? true}) {:sync? true}))
         ;; Fall back to individual writes
         (doseq [[address node] pending]
-          (k/assoc store address node {:sync? true}))))
+          (k/assoc store address node {:immutable? true} {:sync? true}))))
     ;; Atomic removal: drop only the items we processed, keep any new ones
     (swap! (.-pending-writes storage) #(vec (drop (count pending) %)))
     nil))
