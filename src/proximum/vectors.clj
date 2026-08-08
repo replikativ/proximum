@@ -296,9 +296,23 @@
         mmap-header-count (if mmap-compatible?
                             (get-in existing-mmap [:header :count])
                             0)
-        ;; Determine capacity needed
+        ;; Determine capacity needed. The created capacity comes from the
+        ;; index's immutable config (:max-nodes) — restore-index already
+        ;; sizes the PersistentEdgeIndex from it, and without consulting it
+        ;; here too the restored vector mmap shrinks to vector-count +
+        ;; extra-capacity. On hosts where the mmap cache does not survive
+        ;; restarts (ephemeral /tmp), that reset every process start's
+        ;; append headroom to extra-capacity, and long-lived indexes hit
+        ;; "Index capacity exceeded" far below their created :capacity.
+        ;; The mmap file is sparse, so sizing to the created capacity costs
+        ;; disk only as vectors actually land. A store with no readable
+        ;; :index/config falls back to the count-based sizing.
         extra-capacity 10000
-        required-capacity (+ vector-count extra-capacity)
+        configured-capacity (try (:max-nodes (k/get store :index/config nil
+                                                    {:sync? true}))
+                                 (catch Exception _ nil))
+        required-capacity (max (+ vector-count extra-capacity)
+                               (long (or configured-capacity 0)))
         ;; Create or reuse mmap
         actual-mmap-path (or mmap-path
                              (str (System/getProperty "java.io.tmpdir")

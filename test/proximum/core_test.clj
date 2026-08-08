@@ -805,6 +805,34 @@
 ;; -----------------------------------------------------------------------------
 ;; Metrics tests
 
+(deftest test-load-preserves-created-capacity
+  (let [storage-path (temp-path)]
+    (try
+      (testing "a reload without a surviving mmap cache keeps the created
+                :capacity — not vector-count + headroom"
+        (let [idx (create-test-index {:type :hnsw
+                                      :dim 32
+                                      :M 8
+                                      :ef-construction 50
+                                      :storage-path storage-path
+                                      :capacity 15000})
+              idx2 (core/insert-batch idx (random-vectors 5 32) (range 5))]
+          (is (= 15000 (:capacity (core/index-metrics idx2)))
+              "created at the configured capacity")
+          (let [idx3 (a/<!! (core/sync! idx2))]
+            (a/<!! (core/close! idx3)))
+          ;; Load with a FRESH mmap dir — the wiped-cache restart case
+          ;; (ephemeral /tmp). A surviving compatible mmap file would be
+          ;; reused and short-circuit the sizing under test.
+          (let [fresh-mmap (str storage-path "/mmap-fresh")]
+            (.mkdirs (File. fresh-mmap))
+            (let [loaded (core/load (store-config-for storage-path *store-id*)
+                                    :mmap-dir fresh-mmap)]
+              (is (= 15000 (:capacity (core/index-metrics loaded)))
+                  "restore honours the created capacity, not count + 10k")
+              (a/<!! (core/close! loaded))))))
+      (finally (cleanup storage-path)))))
+
 (deftest test-metrics
   (let [path (temp-path)]
     (try
