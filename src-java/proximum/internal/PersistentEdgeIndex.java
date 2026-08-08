@@ -94,9 +94,17 @@ public final class PersistentEdgeIndex {
     // Transient/persistent mode
     private final AtomicBoolean edit;
 
-    // Dirty chunk tracking for persistence
+    // Dirty chunk tracking for persistence: chunks modified since the last
+    // successful sync. Inherited by forks, because a fork shares the parent's
+    // not-yet-persisted chunk contents and must persist them itself.
     // Encoded as: (layer << 32) | chunkIdx  (layer 0 = 0, upper layers = 1+)
     private final Set<Long> dirtyChunks;
+
+    // Chunk ownership tracking for copy-on-write: chunks this instance
+    // allocated or cloned, and may therefore mutate in place while transient.
+    // Always empty in a fresh fork - every inherited chunk is still shared with
+    // the parent and must be cloned before the first write.
+    private final Set<Long> ownedChunks;
 
     // =========================================================================
     // Lazy Loading Support (optional - null = in-memory only mode)
@@ -163,6 +171,7 @@ public final class PersistentEdgeIndex {
 
         this.edit = new AtomicBoolean(false);
         this.dirtyChunks = ConcurrentHashMap.newKeySet();
+        this.ownedChunks = ConcurrentHashMap.newKeySet();
 
         // Lazy loading support
         this.storage = storage;
@@ -185,7 +194,8 @@ public final class PersistentEdgeIndex {
             ReentrantLock[] stripedLocks, Object[] allocLocks,
             ChunkStorage storage,
             SoftReference<int[]>[] layer0Refs, SoftReference<int[]>[][] upperLayerRefs,
-            int deletedCount, long[] deletedNodesBitset) {
+            int deletedCount, long[] deletedNodesBitset,
+            Set<Long> inheritedDirtyChunks) {
         this.maxNodes = maxNodes;
         this.maxLevel = maxLevel;
         this.M = M;
@@ -217,8 +227,18 @@ public final class PersistentEdgeIndex {
         // Start in persistent mode
         this.edit = new AtomicBoolean(false);
 
-        // Fork starts with empty dirty set
+        // A fork inherits the parent's unpersisted modifications: the chunks are
+        // shared, so their pending changes are the fork's to persist too.
+        // Without this, syncing a fork writes only what changed since the fork
+        // and silently drops every earlier modification (issue #7).
         this.dirtyChunks = ConcurrentHashMap.newKeySet();
+        if (inheritedDirtyChunks != null) {
+            this.dirtyChunks.addAll(inheritedDirtyChunks);
+        }
+
+        // Ownership does NOT transfer: every chunk is still shared with the
+        // parent and must be cloned before this fork writes to it.
+        this.ownedChunks = ConcurrentHashMap.newKeySet();
 
         // Lazy loading support - share storage (address-map is in Clojure)
         this.storage = storage;
@@ -336,7 +356,8 @@ public final class PersistentEdgeIndex {
             stripedLocks, allocLocks,
             storage,
             newL0Refs, newUpperRefs,
-            deletedCount.get(), newDeleted
+            deletedCount.get(), newDeleted,
+            dirtyChunks
         );
     }
 
@@ -852,11 +873,11 @@ public final class PersistentEdgeIndex {
                         chunks[chunkIdx] = chunk;
                     }
                 }
-            } else if (!dirtyChunks.contains(chunkAddr)) {
+            } else if (!ownedChunks.contains(chunkAddr)) {
                 // Chunk is inherited from fork - must CoW before mutation
                 synchronized (allocLocks[chunkIdx & ALLOC_LOCK_MASK]) {
                     // Re-check under lock
-                    if (!dirtyChunks.contains(chunkAddr)) {
+                    if (!ownedChunks.contains(chunkAddr)) {
                         chunk = oldChunk.clone();
                         chunks[chunkIdx] = chunk;
                     } else {
@@ -946,11 +967,11 @@ public final class PersistentEdgeIndex {
                         layerChunks[chunkIdx] = chunk;
                     }
                 }
-            } else if (!dirtyChunks.contains(chunkAddr)) {
+            } else if (!ownedChunks.contains(chunkAddr)) {
                 // Chunk is inherited from fork - must CoW before mutation
                 synchronized (allocLocks[(layerIdx * 31 + chunkIdx) & ALLOC_LOCK_MASK]) {
                     // Re-check under lock
-                    if (!dirtyChunks.contains(chunkAddr)) {
+                    if (!ownedChunks.contains(chunkAddr)) {
                         chunk = oldChunk.clone();
                         oldLayerChunks[chunkIdx] = chunk;
                         layerChunks = oldLayerChunks;
@@ -1209,6 +1230,7 @@ public final class PersistentEdgeIndex {
         entrypoint.set(-1);
         currentMaxLevel.set(-1);
         dirtyChunks.clear();
+        ownedChunks.clear();
         deletedCount.set(0);
     }
 
@@ -1370,7 +1392,11 @@ public final class PersistentEdgeIndex {
      * Dirty chunks will get new storage addresses on next sync.
      */
     private void markDirty(int layer, int chunkIdx) {
-        dirtyChunks.add(encodePosition(layer, chunkIdx));
+        long pos = encodePosition(layer, chunkIdx);
+        dirtyChunks.add(pos);
+        // Every markDirty call site has just allocated or cloned the chunk into
+        // this instance, so it is owned from here on.
+        ownedChunks.add(pos);
     }
 
     /**

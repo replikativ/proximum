@@ -592,7 +592,7 @@
 
             (a/<!! (core/close! idx2)))))
 
-      (testing "Fork starts with empty dirty set"
+      (testing "Fork inherits pending dirty chunks but owns none of them"
         (let [idx (create-test-index {:type :hnsw
                                       :dim 32
                                       :M 8
@@ -607,11 +607,20 @@
           ;; Original has dirty chunks after insert
           (is (.hasDirtyChunks ^PersistentEdgeIndex pes2))
 
-          ;; Fork should start clean
+          ;; A fork shares the parent's not-yet-persisted chunks, so it inherits
+          ;; the obligation to persist them (issue #7) ...
           (let [forked (core/fork idx2)
                 pes-forked (p/edge-storage forked)]
-            (is (not (.hasDirtyChunks ^PersistentEdgeIndex pes-forked))
-                "Forked PES should have empty dirty set"))
+            (is (= (set (.getDirtyChunks ^PersistentEdgeIndex pes2))
+                   (set (.getDirtyChunks ^PersistentEdgeIndex pes-forked)))
+                "Forked PES should inherit the parent's dirty set")
+
+            ;; ... while owning none of them: writing through the fork must
+            ;; copy-on-write, leaving the parent's graph untouched.
+            (let [parent-edges (.countEdges ^PersistentEdgeIndex pes2)]
+              (core/insert forked (random-vec 32) 999)
+              (is (= parent-edges (.countEdges ^PersistentEdgeIndex pes2))
+                  "Insert through the fork must not mutate the parent's graph")))
 
           (a/<!! (core/close! idx2))))
 
@@ -751,6 +760,46 @@
       (finally
         (cleanup storage-path)
         (cleanup (str storage-path "-load"))))))
+
+(deftest test-reload-preserves-graph-after-incremental-inserts
+  ;; Regression for #7. The reload test above ingests with a single
+  ;; insert-batch, i.e. a single fork, so every modified chunk is still marked
+  ;; dirty at sync time. Ingesting one vector at a time forks per insert, which
+  ;; used to reset the dirty set — only the chunks touched by the *last* insert
+  ;; were persisted, and the reloaded graph silently lost most of its edges
+  ;; (occasionally isolating the entrypoint, so search returned 1 hit).
+  (let [storage-path (temp-path)]
+    (try
+      (testing "one-at-a-time inserts persist the whole graph, not just the last insert's chunks"
+        (let [idx (create-test-index {:type :hnsw
+                                      :dim 32
+                                      :M 8
+                                      :ef-construction 50
+                                      :storage-path storage-path
+                                      :capacity 5000})
+              idx2 (reduce (fn [i n] (core/insert i (random-vec 32) n))
+                           idx (range 3000))
+              query (random-vec 32)
+              orig-edge-count (.countEdges ^PersistentEdgeIndex (p/edge-storage idx2))
+              orig-entrypoint (.getEntrypoint ^PersistentEdgeIndex (p/edge-storage idx2))
+              orig-results (core/search idx2 query 10 {:ef 50})
+              idx3 (a/<!! (core/sync! idx2))]
+          (a/<!! (core/close! idx3))
+          (let [loaded (core/load (store-config-for storage-path *store-id*)
+                                  :mmap-dir (mmap-dir-for storage-path))]
+            (is (= orig-edge-count
+                   (.countEdges ^PersistentEdgeIndex (p/edge-storage loaded)))
+                "every edge written before sync should survive the reload")
+            (is (= orig-entrypoint
+                   (.getEntrypoint ^PersistentEdgeIndex (p/edge-storage loaded)))
+                "entrypoint should survive the reload")
+            (is (= 10 (count (core/search loaded query 10 {:ef 50})))
+                "reloaded graph should still be navigable")
+            (is (= (set (map :id orig-results))
+                   (set (map :id (core/search loaded query 10 {:ef 50}))))
+                "search results should match after reload")
+            (a/<!! (core/close! loaded)))))
+      (finally (cleanup storage-path)))))
 
 (deftest test-deleted-bitset-persistence
   (let [storage-path (temp-path)]
