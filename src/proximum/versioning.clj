@@ -122,8 +122,13 @@
         ;; who syncs and then keeps branching the pre-sync handle has a nil
         ;; commit-id on a handle whose data is fully persisted. That is safe;
         ;; what is not safe is the snapshot not covering what is in memory.
+        ;; Metadata edits move no count, so they need their own flag - without
+        ;; it a branch taken after an unsynced with-metadata silently lacks the
+        ;; edit.
+        unsynced-metadata? (p/unsynced-metadata? idx)
         _ (when (or (not= in-memory-count snapshot-count)
-                    (not= in-memory-deleted snapshot-deleted))
+                    (not= in-memory-deleted snapshot-deleted)
+                    unsynced-metadata?)
             (throw (ex-info "Cannot branch an index with unsynced changes. Call sync! first."
                             {:branch current-branch
                              :in-memory-count in-memory-count
@@ -131,6 +136,7 @@
                              :in-memory-deleted in-memory-deleted
                              :snapshot-deleted snapshot-deleted
                              :commit-id (p/current-commit idx)
+                             :unsynced-metadata? unsynced-metadata?
                              :hint "(sync! idx) returns a channel - take from it, then branch the index it delivers"})))
 
         ;; Use Forkable protocol for clean forking
@@ -191,9 +197,17 @@
     ;; io/delete-file's silent flag would swallow every failure reason, not
     ;; just "already gone" - a branch file we cannot delete is a real leak and
     ;; should surface.
-    (when mmap-dir
+    (if mmap-dir
       (let [mmap-path (vectors/branch-mmap-path mmap-dir branch)]
-        (java.nio.file.Files/deleteIfExists (.toPath (io/file mmap-path)))))
+        (java.nio.file.Files/deleteIfExists (.toPath (io/file mmap-path))))
+      ;; Without an :mmap-dir on this handle we cannot derive the branch's file
+      ;; path, so any cache for it stays on disk after the branch is gone -
+      ;; unreferenced and invisible. Say so instead of leaking silently; the
+      ;; caller is the only one who knows where their mmap-dir is.
+      (log/warn :proximum/versioning
+                "Deleted branch without an :mmap-dir - its mmap cache file may remain"
+                {:branch branch
+                 :hint "Load with :mmap-dir to have delete-branch! clean up the branch's file"}))
     idx))
 
 ;; -----------------------------------------------------------------------------
@@ -458,8 +472,12 @@
         ;; Sync with merge parents to create the merge commit - returns channel
         sync-chan (p/sync! merged-idx {:parents merge-parents
                                        :message message})]
-    ;; Close source index and return channel
-    (p/close! source-idx)
-    ;; Return channel that delivers synced index
+    ;; Return a channel that delivers the synced index, and fold the source
+    ;; index's cleanup into it rather than firing it off unawaited. Taking from
+    ;; the returned channel now means the source's mmap really is released,
+    ;; instead of that happening at some arbitrary later moment.
     (a/go
-      (a/<! sync-chan))))
+      (let [synced (a/<! sync-chan)]
+        (when-let [close-ch (p/close! source-idx)]
+          (a/<! close-ch))
+        synced))))
