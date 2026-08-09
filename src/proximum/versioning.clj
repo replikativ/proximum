@@ -93,6 +93,35 @@
             (throw (ex-info "Current branch has no commits. Call sync! before branching."
                             {:branch current-branch})))
 
+        ;; The docstring has always required a synced index; nothing enforced it.
+        ;; Branching an index with unflushed appends silently corrupts both
+        ;; branches: the fork copies the mmap file, which contains vectors the
+        ;; snapshot does not know about, so the new branch's slot numbering runs
+        ;; ahead of its chunk numbering. Its next flush writes those vectors at
+        ;; the wrong offsets - overwriting the parent's unflushed data - and
+        ;; everything above the snapshot count exists only in the mmap file, so
+        ;; it reads back as zeros as soon as that cache is gone. Counts stay
+        ;; plausible throughout, so nothing surfaces.
+        in-memory-count (p/vector-count-total idx)
+        snapshot-count (or (:branch-vector-count current-snapshot) 0)
+        in-memory-deleted (p/deleted-count-total idx)
+        snapshot-deleted (or (:branch-deleted-count current-snapshot) 0)
+        ;; Compare counts, not :commit-id. A mutation nils the commit-id and
+        ;; sync! sets it again, but sync! returns a NEW index value - a caller
+        ;; who syncs and then keeps branching the pre-sync handle has a nil
+        ;; commit-id on a handle whose data is fully persisted. That is safe;
+        ;; what is not safe is the snapshot not covering what is in memory.
+        _ (when (or (not= in-memory-count snapshot-count)
+                    (not= in-memory-deleted snapshot-deleted))
+            (throw (ex-info "Cannot branch an index with unsynced changes. Call sync! first."
+                            {:branch current-branch
+                             :in-memory-count in-memory-count
+                             :snapshot-count snapshot-count
+                             :in-memory-deleted in-memory-deleted
+                             :snapshot-deleted snapshot-deleted
+                             :commit-id (p/current-commit idx)
+                             :hint "(sync! idx) returns a channel - take from it, then branch the index it delivers"})))
+
         ;; Use Forkable protocol for clean forking
         forked-vectors (p/fork-vector-storage idx new-branch)
         forked-graph (p/fork-graph-storage idx)
@@ -137,11 +166,14 @@
         mmap-dir (p/mmap-dir idx)]
     ;; Remove from branches set
     (k/update edge-store :branches #(disj % branch) {:sync? true})
-    ;; Delete mmap file for branch
+    ;; Delete mmap file for branch. Files/deleteIfExists rather than
+    ;; exists-then-delete: the latter is a race by construction, and
+    ;; io/delete-file's silent flag would swallow every failure reason, not
+    ;; just "already gone" - a branch file we cannot delete is a real leak and
+    ;; should surface.
     (when mmap-dir
       (let [mmap-path (vectors/branch-mmap-path mmap-dir branch)]
-        (when (.exists (io/file mmap-path))
-          (io/delete-file mmap-path))))
+        (java.nio.file.Files/deleteIfExists (.toPath (io/file mmap-path)))))
     idx))
 
 ;; -----------------------------------------------------------------------------
