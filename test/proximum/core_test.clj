@@ -1124,6 +1124,103 @@
           (a/<!! (core/close! head))))
       (finally (cleanup storage-path)))))
 
+(defn- graph-fingerprint
+  "A structural fingerprint of the built graph: every node's neighbours on
+   layer 0 and layer 1, plus the entrypoint. Far stronger than comparing edge
+   counts, which two different graphs can share."
+  [idx n]
+  (let [^PersistentEdgeIndex pes (p/edge-storage idx)
+        neighbours (fn [layer node]
+                     (if-let [nbrs (.getNeighbors pes (int layer) (int node))]
+                       (vec nbrs)
+                       []))]
+    {:entrypoint (.getEntrypoint pes)
+     :max-level (.getCurrentMaxLevel pes)
+     :layer0 (mapv #(neighbours 0 %) (range n))
+     :layer1 (mapv #(neighbours 1 %) (range n))}))
+
+(defn- build-seeded
+  "Insert vecs one at a time into a fresh in-memory index."
+  [seed vecs extra]
+  (let [idx (create-test-index (merge (cond-> {:type :hnsw
+                                               :dim 32
+                                               :M 8
+                                               :ef-construction 50
+                                               :capacity 1000
+                                               :store-config {:backend :memory
+                                                              :id (java.util.UUID/randomUUID)}}
+                                        seed (assoc :seed seed))
+                                      extra))]
+    (reduce (fn [i n] (core/insert i (nth vecs n) n)) idx (range (count vecs)))))
+
+(deftest test-seeded-construction-is-reproducible
+  ;; Without a seed, HNSW level assignment comes from an unseeded
+  ;; ThreadLocalRandom, so two indexes over identical vectors get different
+  ;; graphs - which is what made test-hash-determinism-same-inputs flaky.
+  (let [vecs (random-vectors 200 32)]
+    (testing "the same seed reproduces the same graph"
+      (is (= (graph-fingerprint (build-seeded 12345 vecs nil) 200)
+             (graph-fingerprint (build-seeded 12345 vecs nil) 200))
+          "same seed, same vectors, same insertion order => identical graph")
+      (is (= (graph-fingerprint (build-seeded 999 vecs nil) 200)
+             (graph-fingerprint (build-seeded 999 vecs nil) 200))
+          "and again with a different seed"))
+
+    (testing "different seeds give different graphs"
+      ;; Only one pair is compared, which is enough in practice: an
+      ;; implementation that ignored the seed would make these identical.
+      (is (not= (graph-fingerprint (build-seeded 1 vecs nil) 200)
+                (graph-fingerprint (build-seeded 2 vecs nil) 200))
+          "distinct seeds should produce distinct level assignments"))
+
+    (testing "an unseeded index is not reproducible"
+      ;; Guards the premise: if this ever starts passing, levels stopped being
+      ;; random and these tests are no longer testing what they claim.
+      (is (not= (graph-fingerprint (build-seeded nil vecs nil) 200)
+                (graph-fingerprint (build-seeded nil vecs nil) 200))
+          "no seed => graphs differ"))))
+
+(deftest test-seed-survives-store-round-trip
+  ;; The seed is only useful if it survives the way an index actually travels.
+  ;; This also covers the construction parameters it depends on: restore-index
+  ;; used to read :ml and :ef-construction from the branch snapshot, which never
+  ;; carried them, so a reloaded index silently switched to ml=0.36067/ef=200.
+  (let [storage-path (temp-path)]
+    (try
+      (let [vecs (random-vectors 400 32)
+            store-config (store-config-for storage-path *store-id*)
+            ;; One session, all 400.
+            in-session (build-seeded 42 vecs nil)
+            ;; Same 400, but persisted and reloaded halfway through.
+            first-half (reduce (fn [i n] (core/insert i (nth vecs n) n))
+                               (create-test-index {:type :hnsw
+                                                   :dim 32
+                                                   :M 8
+                                                   :ef-construction 50
+                                                   :capacity 1000
+                                                   :seed 42
+                                                   :store-config store-config
+                                                   :mmap-dir (mmap-dir-for storage-path)})
+                               (range 200))
+            synced (a/<!! (core/sync! first-half))]
+        (a/<!! (core/close! synced))
+        (let [reloaded (core/load store-config :mmap-dir (mmap-dir-for storage-path))
+              config (core/index-config reloaded)]
+          (is (= 42 (:seed config)) "the seed survives the round-trip")
+          (is (= 50 (:ef-construction config))
+              "so does ef-construction, instead of silently becoming 200")
+          (is (< (Math/abs (- (double (:ml (hnsw.i/state reloaded)))
+                              (/ 1.0 (Math/log 8))))
+                 1e-9)
+              "and ml, instead of silently becoming 0.36067")
+          (let [second-half (reduce (fn [i n] (core/insert i (nth vecs n) n))
+                                    reloaded (range 200 400))]
+            (is (= (graph-fingerprint in-session 400)
+                   (graph-fingerprint second-half 400))
+                "a reload mid-build reproduces the single-session graph exactly")
+            (a/<!! (core/close! second-half)))))
+      (finally (cleanup storage-path)))))
+
 (deftest test-metrics
   (let [path (temp-path)]
     (try

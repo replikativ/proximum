@@ -209,6 +209,7 @@ public class ProximumVectorStore implements AutoCloseable {
         private int chunkSize = 1000;
         private int cacheSize = 10000;
         private Integer maxLevels;
+        private Long seed;
 
         private Builder() {}
 
@@ -296,6 +297,12 @@ public class ProximumVectorStore implements AutoCloseable {
             return this;
         }
 
+        /** Construction seed for reproducible indexes. When set, a node's HNSW level is a pure function of (seed, node id), so rebuilding the same vectors in the same order yields the same graph - and, under :crypto-hash?, the same commit hashes. Unset (the default), levels come from an unseeded RNG and two indexes over identical data will differ. Note that reproducing a whole graph also requires sequential inserts: parallel insert-batch races on neighbour selection regardless of the seed. */
+        public Builder seed(Long seed) {
+            this.seed = seed;
+            return this;
+        }
+
         /** Alias for dim() - set vector dimensions. */
         public Builder dimensions(int dimensions) {
             return dim(dimensions);
@@ -334,7 +341,7 @@ public class ProximumVectorStore implements AutoCloseable {
             }
             ensureInitialized();
 
-            // Build config map
+            // Build config map (generated from the HnswConfig schema)
             Map<String, Object> configMap = new HashMap<>();
             configMap.put(":type", ":hnsw");
             configMap.put(":dim", dim);
@@ -358,6 +365,9 @@ public class ProximumVectorStore implements AutoCloseable {
             }
             if (maxLevels != null) {
                 configMap.put(":max-levels", maxLevels);
+            }
+            if (seed != null) {
+                configMap.put(":seed", seed);
             }
 
             Object result = createIndexFn.invoke(toClojureMap(configMap));
