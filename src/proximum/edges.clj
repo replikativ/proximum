@@ -151,10 +151,13 @@
    (flush-dirty-chunks-async! store pes existing-address-map {}))
   ([store ^PersistentEdgeIndex pes existing-address-map {:keys [crypto-hash?]}]
    (when (.hasDirtyChunks pes)
-     (let [dirty-positions (.getDirtyChunks pes)
-           ;; Start with existing address map (from previous sync or load)
-           ;; Remove dirty positions (they'll get new addresses)
-           base-map (reduce dissoc (or existing-address-map {}) dirty-positions)
+     (let [;; Snapshot the dirty set: getDirtyChunks returns the LIVE set, and
+           ;; the caller clears it once the writes land. Iterating it directly
+           ;; would let anything dirtied mid-flush be cleared unwritten, and
+           ;; would let the two passes below disagree about membership.
+           ;; Sorted so the chunk-hash vector (and thus the merkle commit hash)
+           ;; does not depend on hash-set iteration order.
+           dirty-positions (vec (sort (.getDirtyChunks pes)))
            ;; Process dirty chunks: get bytes, compute address, fire async write
            ;; In crypto-hash mode: address = hash(content) (merkle)
            ;; In normal mode: address = random long
@@ -173,14 +176,35 @@
                           :chunk-hashes (if crypto-hash?
                                           (conj chunk-hashes storage-addr)
                                           chunk-hashes)})
-                       {:channels channels :new-addrs new-addrs :chunk-hashes chunk-hashes}))
+                       ;; A position is dirty precisely because its content
+                       ;; changed, so failing to resolve it leaves no good
+                       ;; option: dropping it from the address map truncates the
+                       ;; restored graph, and keeping the old address restores
+                       ;; pre-modification bytes that nothing downstream can
+                       ;; detect - verify-edges-from-cold re-hashes the blob and
+                       ;; happily matches its own address. Both corrupt silently,
+                       ;; so refuse the sync instead. Unreachable today: every
+                       ;; dirty position names a chunk this instance or an
+                       ;; ancestor allocated, and fork clones the chunk arrays.
+                       (throw (ex-info "Dirty edge chunk could not be resolved - refusing to sync"
+                                       {:position pos
+                                        :layer (PersistentEdgeIndex/decodeLayer pos)
+                                        :chunk-idx (PersistentEdgeIndex/decodeChunkIdx pos)
+                                        :hint "The chunk was marked modified but is no longer in memory or storage"}))))
                    {:channels #{} :new-addrs {} :chunk-hashes []}
                    dirty-positions)
            new-addresses (:new-addrs result)
-           address-map (merge base-map new-addresses)]
+           ;; Only positions that actually got a new address are rewritten. A
+           ;; position we could not serialize keeps its previous address rather
+           ;; than vanishing from the map (a vanished position is never loaded
+           ;; on restore, and its blob is then collected as garbage).
+           address-map (merge (or existing-address-map {}) new-addresses)]
        {:channels (:channels result)
         :address-map address-map
         :new-addresses new-addresses
+        ;; Exactly what this flush covered, so the caller clears only these
+        ;; positions instead of wiping the whole dirty set.
+        :flushed-positions (set (keys new-addresses))
         :chunk-hashes (:chunk-hashes result)}))))
 
 (defn sync-edges!
@@ -225,8 +249,10 @@
            (doseq [pos (keys new-addresses)]
              (.softifyChunk pes pos)))
 
-         ;; Clear dirty set after successful sync
-         (.clearDirty pes)
+         ;; Clear dirty marks for exactly the positions this sync persisted,
+         ;; not the whole set - anything dirtied while the writes were in
+         ;; flight still needs persisting.
+         (.clearDirty pes ^java.util.Collection (set (keys new-addresses)))
 
          {:address-map address-map
           :commit-hash commit-hash})

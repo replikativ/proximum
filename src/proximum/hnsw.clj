@@ -847,13 +847,15 @@
           edge-store (:edge-store (.-state idx))
           pes (.-pes-edges idx)
           _ (vectors/flush-write-buffer-async! vs)
+          flushed-positions (atom nil)
           new-address-map
           (if edge-store
-            (if-let [{:keys [channels address-map]}
+            (if-let [{:keys [channels address-map] :as flush-result}
                      (edges/flush-dirty-chunks-async! edge-store pes (:address-map (.-state idx))
                                                       {:crypto-hash? (:crypto-hash? (.-state idx))})]
               (do
                 (swap! (:pending-edge-writes (.-state idx)) into channels)
+                (reset! flushed-positions (:flushed-positions flush-result))
                 address-map)
               (:address-map (.-state idx)))
             (:address-map (.-state idx)))
@@ -877,9 +879,9 @@
               (a/<! ch))
             (swap! edge-pending #(reduce disj % edge-channels-to-wait)))
 
-          ;; Clear dirty
+          ;; Clear dirty marks for exactly what this flush persisted
           (when edge-store
-            (.clearDirty ^PersistentEdgeIndex pes))
+            (.clearDirty ^PersistentEdgeIndex pes ^java.util.Collection @flushed-positions))
 
           ;; Return updated index with new address-map
           (update-hnsw-index idx {:address-map new-address-map
@@ -974,10 +976,6 @@
                                  (swap! (:pending-chunk-hashes vs)
                                         #(vec (drop (count vectors-pending-hashes) %))))
 
-             ;; Clear dirty edges
-                               (when edge-store
-                                 (.clearDirty ^PersistentEdgeIndex pes))
-
              ;; 7. Store all PSS structures and create commit
                                (if-let [store (:storage state)]
                                  (let [;; Store metadata PSS
@@ -1018,9 +1016,31 @@
                  ;; Write commit entry and branch head using helper
                                    (writing/write-commit! edge-store commit-id branch snapshot)
 
-                 ;; Return updated index with new values
-                                   (update-hnsw-index idx {:address-map new-address-map
-                                                           :commit-id commit-id}))
+                 ;; Only now are these chunks durably referenced: the blobs land
+                 ;; earlier, but the address map that points at them is part of
+                 ;; the commit. Clearing before this point means a throw in
+                 ;; between leaves the branch head on the old commit with the
+                 ;; marks already gone, so the next sync writes nothing and
+                 ;; those chunks are lost for this lineage.
+                 ;; Clear the marks on a FORK, and hand that fork back as the
+                 ;; synced index. The dirty set is mutable state on the edge
+                 ;; index object, which sync! shares with the index value it was
+                 ;; called on - clearing in place would tell that older value
+                 ;; its chunks are persisted while only the returned value
+                 ;; learns their addresses. Continuing to insert from the older
+                 ;; value would then drop them again, which is issue #7 one
+                 ;; level up. Forking keeps each lineage's bookkeeping its own.
+                                   (let [^PersistentEdgeIndex synced-pes
+                                         (if edge-store
+                                           (let [^PersistentEdgeIndex forked (.fork ^PersistentEdgeIndex pes)]
+                                             (.clearDirty forked
+                                                          ^java.util.Collection
+                                                          (:flushed-positions edges-async-result))
+                                             forked)
+                                           pes)]
+                                     (update-hnsw-index idx {:pes-edges synced-pes
+                                                             :address-map new-address-map
+                                                             :commit-id commit-id})))
 
                ;; No storage - just return index with updated address-map
                                  (update-hnsw-index idx {:address-map new-address-map})))
