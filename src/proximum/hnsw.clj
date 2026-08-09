@@ -1144,14 +1144,15 @@
                                      (:reflink-supported? state))
       ;; Get config for new VectorStore
       (let [config (k/get edge-store :index/config nil {:sync? true})
-            {:keys [dim chunk-size]} config
+            {:keys [dim chunk-size max-nodes]} config
             vectors-addr-map @(:chunk-address-map vs)
             vector-count (:vector-count state)
             commit-hash (when-let [ch (:commit-hash vs)] @ch)]
         ;; Open new VectorStore pointing at copied mmap
         (vectors/open-store* edge-store dim chunk-size crypto-hash?
                              dst-mmap-path vectors-addr-map
-                             vector-count commit-hash))))
+                             vector-count commit-hash
+                             max-nodes))))
 
   (assemble-forked-index [idx forked-vectors forked-graph new-branch new-commit-id]
     (update-hnsw-index idx {:vectors forked-vectors
@@ -1273,6 +1274,15 @@
   (let [;; Read immutable config from :index/config
         config (k/get edge-store :index/config nil {:sync? true})
         {:keys [dim M M0 max-nodes max-level chunk-size distance crypto-hash?]} config
+        ;; Every field below is required to rebuild the index. Without this
+        ;; check a partial config surfaces as an NPE from deep inside the mmap
+        ;; or edge-index construction, after those have already allocated.
+        _ (when-let [missing (seq (remove #(some? (get config %))
+                                          [:dim :M :M0 :max-nodes :chunk-size]))]
+            (throw (ex-info "Index config is missing or incomplete - cannot restore"
+                            {:missing (vec missing)
+                             :config config
+                             :hint "The store's :index/config key is absent or was written by an incompatible version"})))
 
         ;; Read mutable state from branch snapshot
         {:keys [metadata-pss-root external-id-pss-root
@@ -1303,7 +1313,8 @@
         vs (vectors/open-store* edge-store dim chunk-size crypto-hash?
                                 actual-mmap-path vectors-addr-map
                                 (or branch-vector-count 0)
-                                (:vectors-commit-hash snapshot))
+                                (:vectors-commit-hash snapshot)
+                                max-nodes)
 
         ;; Create PES and switch to transient mode for initialization
         max-level-int (or max-level 16)

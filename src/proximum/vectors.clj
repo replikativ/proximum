@@ -293,8 +293,15 @@
 
 (defn open-store*
   "Internal: Open an existing vector store. All params required.
-   Called only from restore-index-from-snapshot and branch!."
-  [store dim chunk-size crypto-hash? mmap-path address-map vector-count commit-hash]
+   Called only from restore-index-from-snapshot and branch!.
+
+   `capacity` is the index's created capacity (:index/config's :max-nodes),
+   which is the authority on how large the index may grow - the same value
+   restore-index sizes the PersistentEdgeIndex from. Pass nil only when no
+   config is available, in which case sizing falls back to the vector count
+   plus a fixed headroom."
+  [store dim chunk-size crypto-hash? mmap-path address-map vector-count commit-hash
+   capacity]
   (let [;; Try to open existing mmap if path provided
         existing-mmap (when mmap-path (open-existing-mmap mmap-path))
         ;; Check if existing mmap is compatible
@@ -304,19 +311,44 @@
         mmap-header-count (if mmap-compatible?
                             (get-in existing-mmap [:header :count])
                             0)
-        ;; Determine capacity needed
+        ;; Determine capacity needed. The created capacity governs, so a
+        ;; restored index has exactly the ceiling it was created with:
+        ;;   - sizing below it stranded appends at count + headroom, which on
+        ;;     hosts where the mmap cache does not survive a restart reset the
+        ;;     ceiling on every boot ("Index capacity exceeded" far below the
+        ;;     configured :capacity, :utilization pinned at 1.0)
+        ;;   - sizing above it let appends past :max-nodes through the guard in
+        ;;     hnsw/insert and blow up inside PersistentEdgeIndex with a raw
+        ;;     ArrayIndexOutOfBoundsException instead of the intended error
+        ;; The floor at vector-count keeps an already-oversized store readable.
+        ;; The mmap file is sparse, so the larger size costs disk only as live
+        ;; vectors land.
         extra-capacity 10000
-        required-capacity (+ vector-count extra-capacity)
+        required-capacity (if capacity
+                            (max vector-count (long capacity))
+                            (+ vector-count extra-capacity))
         ;; Create or reuse mmap
         actual-mmap-path (or mmap-path
                              (str (System/getProperty "java.io.tmpdir")
                                   "/vectors-" (System/currentTimeMillis) ".mmap"))
         reuse-existing? (and mmap-compatible?
                              (>= (:capacity existing-mmap) required-capacity))
-        {:keys [mmap-buf mem-segment arena capacity]}
+        ;; Release a mapping we opened but are not adopting: a shared Arena has
+        ;; no cleaner, so dropping it on the floor retains the mapping (and its
+        ;; address space) for the life of the process.
+        _ (when (and existing-mmap (not reuse-existing?))
+            (.close ^Arena (:arena existing-mmap)))
+        ;; Bind the FILE's capacity separately - it is not the index's ceiling.
+        ;; A file written before restores honoured the created capacity is
+        ;; routinely larger than :max-nodes, and adopting its size here is what
+        ;; let appends past :max-nodes through the guard in hnsw/insert.
+        {:keys [mmap-buf mem-segment arena] file-capacity :capacity}
         (if reuse-existing?
           existing-mmap
           (create-mmap-file actual-mmap-path dim chunk-size required-capacity))
+        ;; The created capacity governs whenever we know it, however big the
+        ;; file underneath happens to be.
+        store-capacity (if capacity required-capacity file-capacity)
         ;; Load chunks from konserve that the mmap does not already hold.
         ;; Gate on reuse-existing?, NOT mmap-compatible?: when the mapping is
         ;; rejected (too small) we recreate it, but create-mmap-file setLengths
@@ -348,7 +380,7 @@
      mmap-buf
      mem-segment
      arena
-     capacity
+     store-capacity
      crypto-hash?
      (when crypto-hash? (atom commit-hash))
      (when crypto-hash? (atom []))

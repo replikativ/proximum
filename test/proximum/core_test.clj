@@ -877,6 +877,139 @@
 ;; -----------------------------------------------------------------------------
 ;; Metrics tests
 
+(deftest test-load-preserves-created-capacity
+  ;; Original repro by Alex Oloo (#8): an index created with :capacity N only
+  ;; honoured N for the lifetime of the creating process. Restores sized the
+  ;; mmap at count + headroom, so on hosts where the mmap cache does not survive
+  ;; a restart every boot reset the ceiling and long-lived indexes wedged with
+  ;; "Index capacity exceeded" far below their created capacity.
+  (let [storage-path (temp-path)]
+    (try
+      (testing "a reload without a surviving mmap cache keeps the created :capacity"
+        (let [idx (create-test-index {:type :hnsw
+                                      :dim 32
+                                      :M 8
+                                      :ef-construction 50
+                                      :storage-path storage-path
+                                      :capacity 15000})
+              idx2 (core/insert-batch idx (random-vectors 5 32) (range 5))]
+          (is (= 15000 (:capacity (core/index-metrics idx2)))
+              "created at the configured capacity")
+          (let [idx3 (a/<!! (core/sync! idx2))]
+            (a/<!! (core/close! idx3)))
+          ;; Load with a FRESH mmap dir - the wiped-cache restart case. A
+          ;; surviving compatible mmap would be reused and short-circuit the
+          ;; sizing under test.
+          (let [fresh-mmap (str storage-path "-mmap-fresh")]
+            (.mkdirs (File. fresh-mmap))
+            (let [loaded (core/load (store-config-for storage-path *store-id*)
+                                    :mmap-dir fresh-mmap)]
+              (is (= 15000 (:capacity (core/index-metrics loaded)))
+                  "restore honours the created capacity, not count + headroom")
+              ;; The symptom is appends failing, not the number being wrong:
+              ;; fill past the old count + 10000 ceiling and require it to work.
+              (let [filled (core/insert-batch loaded (random-vectors 10100 32) (range 5 10105))]
+                (is (= 10105 (core/count-vectors filled))
+                    "appends past the old count + headroom ceiling succeed")
+                (a/<!! (core/close! filled)))))))
+      (finally
+        (cleanup storage-path)
+        (cleanup (str storage-path "-mmap-fresh"))))))
+
+(deftest test-load-clamps-capacity-when-cached-mmap-is-oversized
+  ;; The surviving-cache path, which the fresh-dir tests never reach. A store
+  ;; written before restores honoured the created capacity has an mmap file
+  ;; sized at count + 10000, i.e. larger than :max-nodes. Reusing that file must
+  ;; not adopt its size as the index's ceiling - doing so is exactly what let
+  ;; appends past :max-nodes through and crashed inside PersistentEdgeIndex.
+  (let [storage-path (temp-path)
+        ;; Deliberately outside java.io.tmpdir: vectors/close! deletes mmap
+        ;; files under the temp dir, and this test needs the file to survive.
+        mmap-dir (str "target/test-mmap-oversized-" (System/currentTimeMillis))]
+    (try
+      (.mkdirs (File. mmap-dir))
+      (let [store-config (store-config-for storage-path *store-id*)
+            idx (create-test-index {:type :hnsw
+                                    :dim 32
+                                    :M 8
+                                    :ef-construction 50
+                                    :capacity 100
+                                    :store-config store-config
+                                    :mmap-dir mmap-dir})
+            idx2 (core/insert-batch idx (random-vectors 50 32) (range 50))
+            idx3 (a/<!! (core/sync! idx2))
+            mmap-path (:mmap-path (p/vector-storage idx3))]
+        (a/<!! (core/close! idx3))
+        (is (.exists (File. ^String mmap-path))
+            "the cached mmap must survive close! for this test to mean anything")
+        ;; Grow the cached file to what the old sizing would have produced
+        ;; (count + 10000). The header stays valid; only the derived capacity
+        ;; changes, which is precisely the legacy on-disk state.
+        (let [raf (java.io.RandomAccessFile. ^String mmap-path "rw")]
+          (.setLength raf (+ 64 (* 10050 32 4)))
+          (.close raf))
+        (let [loaded (core/load store-config :mmap-dir mmap-dir)]
+          (is (= 100 (:capacity (core/index-metrics loaded)))
+              "the created capacity governs even when the cached file is bigger")
+          (let [ex (try
+                     (reduce (fn [i n] (core/insert i (random-vec 32) n))
+                             loaded (range 50 200))
+                     nil
+                     (catch clojure.lang.ExceptionInfo e e)
+                     (catch Throwable t t))]
+            (is (instance? clojure.lang.ExceptionInfo ex)
+                "overfilling raises ex-info, not ArrayIndexOutOfBoundsException")
+            (is (re-find #"Index capacity exceeded" (ex-message ex))
+                "and it is the index guard, not the mmap bounds check"))
+          (a/<!! (core/close! loaded))))
+      (finally
+        (cleanup storage-path)
+        (cleanup mmap-dir)))))
+
+(deftest test-load-does-not-exceed-created-capacity
+  ;; The mirror of the above: sizing the restored mmap *above* :max-nodes let
+  ;; appends past the edge index's ceiling through hnsw/insert's guard, and they
+  ;; then blew up inside PersistentEdgeIndex with a raw
+  ;; ArrayIndexOutOfBoundsException instead of the intended error.
+  (let [storage-path (temp-path)]
+    (try
+      (testing "a reload does not advertise more capacity than the index was created with"
+        (let [idx (create-test-index {:type :hnsw
+                                      :dim 32
+                                      :M 8
+                                      :ef-construction 50
+                                      :storage-path storage-path
+                                      :capacity 100})
+              idx2 (core/insert-batch idx (random-vectors 50 32) (range 50))
+              idx3 (a/<!! (core/sync! idx2))]
+          (a/<!! (core/close! idx3))
+          (let [fresh-mmap (str storage-path "-mmap-fresh")]
+            (.mkdirs (File. fresh-mmap))
+            (let [loaded (core/load (store-config-for storage-path *store-id*)
+                                    :mmap-dir fresh-mmap)]
+              (is (= 100 (:capacity (core/index-metrics loaded)))
+                  "restore reports the created capacity, not count + headroom")
+              ;; Filling past the ceiling must raise the intended error rather
+              ;; than an ArrayIndexOutOfBoundsException from the edge index.
+              (let [ex (try
+                         (reduce (fn [i n] (core/insert i (random-vec 32) n))
+                                 loaded (range 50 200))
+                         nil
+                         (catch clojure.lang.ExceptionInfo e e)
+                         (catch Throwable t t))]
+                (is (instance? clojure.lang.ExceptionInfo ex)
+                    "overfilling a restored index raises ex-info, not AIOOBE")
+                ;; Both the index guard and vectors/append!'s mmap bounds check
+                ;; carry {:capacity 100}, so match the message to pin down which.
+                (is (re-find #"Index capacity exceeded" (ex-message ex))
+                    "the index guard fires, not the mmap bounds check")
+                (is (= 100 (:capacity (ex-data ex)))
+                    "the error reports the created capacity"))
+              (a/<!! (core/close! loaded))))))
+      (finally
+        (cleanup storage-path)
+        (cleanup (str storage-path "-mmap-fresh"))))))
+
 (deftest test-metrics
   (let [path (temp-path)]
     (try
