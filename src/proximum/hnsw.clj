@@ -919,6 +919,28 @@
            prev-snapshot (when edge-store (k/get edge-store branch nil {:sync? true}))
            parent-commit-hash (when crypto-hash? (:commit-id prev-snapshot))
 
+          ;; Refuse to write a commit that would move the branch somewhere its
+          ;; own history does not lead. An index restored from a historical
+          ;; commit carries that commit's data; syncing it writes a snapshot
+          ;; whose counts are the historical ones, so the branch head jumps
+          ;; BACKWARDS and everything committed since is orphaned - silently,
+          ;; with every count looking plausible (measured: a branch at 300
+          ;; became 150). The same check catches a branch that another writer
+          ;; advanced while this index held a stale handle, where the write
+          ;; would otherwise discard their commits. git makes you be explicit
+          ;; here; so do we.
+           restored-from (:restored-from-commit state)
+           head-commit (:commit-id prev-snapshot)
+           _ (when (and restored-from head-commit (not= restored-from head-commit))
+               (throw (ex-info "Refusing to sync: this index is not at the branch head"
+                               {:branch branch
+                                :index-restored-from restored-from
+                                :branch-head head-commit
+                                :hint (str "The index was restored from a commit that is no longer "
+                                           "the head of " branch " - either a historical commit, or "
+                                           "the branch was advanced by someone else. Use branch! to "
+                                           "branch! BEFORE writing to commit this work somewhere of its own.")})))
+
            ;; 1. Fire async flush for vectors
            _ (vectors/flush-write-buffer-async! vs)
 
@@ -1062,7 +1084,11 @@
                                            pes)]
                                      (update-hnsw-index idx {:pes-edges synced-pes
                                                              :address-map new-address-map
-                                                             :commit-id commit-id})))
+                                                             :commit-id commit-id
+                                                             ;; This index now IS the branch
+                                                             ;; head, so further syncs are
+                                                             ;; fast-forwards.
+                                                             :restored-from-commit commit-id})))
 
                ;; No storage - just return index with updated address-map
                                  (update-hnsw-index idx {:address-map new-address-map})))
@@ -1190,7 +1216,9 @@
     (update-hnsw-index idx {:vectors forked-vectors
                             :pes-edges forked-graph
                             :branch new-branch
-                            :commit-id new-commit-id}))
+                            :commit-id new-commit-id
+                            ;; The fork is the head of its own new branch.
+                            :restored-from-commit new-commit-id}))
 
   p/GraphMetrics
   (edge-count [idx]
@@ -1455,6 +1483,12 @@
       :pending-edge-writes (atom #{})
       :branch branch
       :commit-id commit-id
+      ;; The commit this index was restored from, unlike :commit-id which every
+      ;; mutation invalidates. sync! compares it against the branch head to tell
+      ;; "I am up to date with the branch" from "I am sitting on a historical
+      ;; commit, or the branch moved under me" - the latter would otherwise
+      ;; write a commit that silently rewinds the branch.
+      :restored-from-commit commit-id
       :vector-count (or branch-vector-count 0)
       :deleted-count (or branch-deleted-count 0)
       :mmap-dir mmap-dir

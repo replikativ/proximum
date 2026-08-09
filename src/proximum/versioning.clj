@@ -87,8 +87,19 @@
                             {:branch new-branch
                              :existing-branches existing-branches})))
 
-        ;; Get current branch snapshot
-        current-snapshot (k/get edge-store current-branch nil {:sync? true})
+        ;; Branch from the commit this index is actually at, which is not always
+        ;; the branch head: an index restored from history sits on an older
+        ;; commit, and basing the new branch on the head would describe data
+        ;; this index does not have - while the precondition check below would
+        ;; compare its counts against the head's and refuse a perfectly clean
+        ;; index. Branching from history is exactly how you commit work started
+        ;; from an older state, so it has to work.
+        head-snapshot (k/get edge-store current-branch nil {:sync? true})
+        idx-commit (p/current-commit idx)
+        current-snapshot (if (and idx-commit
+                                  (not= idx-commit (:commit-id head-snapshot)))
+                           (k/get edge-store idx-commit nil {:sync? true})
+                           head-snapshot)
         _ (when-not current-snapshot
             (throw (ex-info "Current branch has no commits. Call sync! before branching."
                             {:branch current-branch})))
