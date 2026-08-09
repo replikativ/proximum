@@ -354,6 +354,44 @@
         (finally
           (pv/close! idx))))))
 
+(deftest test-branch-rejects-unsynced-appends
+  ;; The dangerous case is not "never synced" (covered above) but "synced once,
+  ;; then appended". branch! used to accept it and silently corrupt both
+  ;; branches: the fork copies an mmap holding vectors the snapshot does not
+  ;; know about, so the new branch's slot numbering runs ahead of its chunk
+  ;; numbering. Its next flush wrote those vectors at the wrong offsets, over
+  ;; the parent's unflushed data, and everything above the snapshot count read
+  ;; back as zeros once the mmap cache was gone. Counts looked right throughout.
+  (testing "branch! rejects an index with appends since the last sync"
+    (let [idx (create-test-index {:type :hnsw
+                                  :dim 32
+                                  :storage-path *test-path*
+                                  :capacity 1000})]
+      (try
+        (let [synced (a/<!! (-> idx (insert-n 20 32) (pv/sync!)))
+              ;; A branch here is fine - nothing has changed since the sync.
+              ok-branch (pv/branch! synced :clean-branch)
+              _ (is (some? ok-branch) "branching a synced index still works")
+              ;; Now append without syncing.
+              dirty (insert-n synced 5 32 #(+ 20 %))]
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                                #"unsynced changes"
+                                (pv/branch! dirty :dirty-branch))
+              "branching with unflushed appends must be refused, not silently corrupt")
+          (let [ex (try (pv/branch! dirty :dirty-branch2) nil
+                        (catch clojure.lang.ExceptionInfo e e))]
+            (is (= 25 (:in-memory-count (ex-data ex)))
+                "the error reports what is actually in memory")
+            (is (= 20 (:snapshot-count (ex-data ex)))
+                "and what the snapshot covers"))
+          ;; Syncing makes it legal again, and the data is intact.
+          (let [resynced (a/<!! (pv/sync! dirty))
+                after (pv/branch! resynced :now-clean)]
+            (is (= 25 (pv/count-vectors after))
+                "after syncing, the branch carries every vector")))
+        (finally
+          (pv/close! idx))))))
+
 (deftest test-branch-duplicate-name-fails
   (testing "branch! with existing name fails"
     (let [idx (create-test-index {:type :hnsw

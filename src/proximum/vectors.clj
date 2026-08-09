@@ -96,6 +96,9 @@
             pending-writes ;; atom: #{channels} from async k/assoc calls
    ;; Mmap cache fields
             mmap-path      ;; path to mmap file (user-provided or temp)
+            owns-mmap-file? ;; true when WE generated the path, so close! may
+                            ;; delete it. A caller-supplied file is a cache to
+                            ;; be reused on next open, never ours to remove.
             mmap-buf       ;; MappedByteBuffer
             mem-segment    ;; MemorySegment for SIMD
             arena          ;; Arena for MemorySegment lifecycle (ofShared for proper cleanup)
@@ -211,7 +214,11 @@
    Uses Arena.ofShared() for proper resource lifecycle - arena must be closed explicitly."
   [^String path]
   (let [file (File. path)]
-    (when (.exists file)
+    ;; Require a full header up front: RandomAccessFile "rw" CREATES the file,
+    ;; so an exists-then-open check turns a file deleted in between into a
+    ;; brand-new 0-byte one, which then fails deep in read-header with a
+    ;; BufferUnderflowException instead of being treated as "no cache here".
+    (when (and (.exists file) (>= (.length file) (long HEADER-SIZE)))
       (let [raf (RandomAccessFile. file "rw")
             file-size (.length raf)
             channel (.getChannel raf)
@@ -274,6 +281,7 @@
      (atom [])           ;; write-buffer
      (atom #{})          ;; pending-writes
      actual-mmap-path
+     (nil? mmap-path)    ;; owns-mmap-file? - true only if we generated the path
      mmap-buf
      mem-segment
      arena
@@ -303,12 +311,20 @@
         actual-mmap-path (or mmap-path
                              (str (System/getProperty "java.io.tmpdir")
                                   "/vectors-" (System/currentTimeMillis) ".mmap"))
+        reuse-existing? (and mmap-compatible?
+                             (>= (:capacity existing-mmap) required-capacity))
         {:keys [mmap-buf mem-segment arena capacity]}
-        (if (and mmap-compatible? (>= (:capacity existing-mmap) required-capacity))
+        (if reuse-existing?
           existing-mmap
           (create-mmap-file actual-mmap-path dim chunk-size required-capacity))
-        ;; Load chunks from konserve that mmap doesn't have
-        start-chunk (if mmap-compatible?
+        ;; Load chunks from konserve that the mmap does not already hold.
+        ;; Gate on reuse-existing?, NOT mmap-compatible?: when the mapping is
+        ;; rejected (too small) we recreate it, but create-mmap-file setLengths
+        ;; the same path rather than zeroing it, so the old bytes are still
+        ;; there. Trusting the rejected file's header count then skips reloading
+        ;; chunks the caller never validated - serving whatever happened to be
+        ;; in that file. Only a mapping we actually adopted may be trusted.
+        start-chunk (if reuse-existing?
                       (chunk-id mmap-header-count chunk-size)
                       0)
         end-chunk (if (zero? vector-count)
@@ -328,6 +344,7 @@
      (atom [])
      (atom #{})
      actual-mmap-path
+     (nil? mmap-path)    ;; owns-mmap-file? - true only if we generated the path
      mmap-buf
      mem-segment
      arena
@@ -559,13 +576,14 @@
     ;; Close arena to unmap MemorySegment (must be done before deleting file)
     (when-let [arena (:arena vs)]
       (.close arena))
-    ;; Clean up temp file (only if it's a temp file, not user-provided)
-    (let [mmap-path (:mmap-path vs)
-          temp-dir (System/getProperty "java.io.tmpdir")]
-      (when (.startsWith ^String mmap-path temp-dir)
-        (let [f (File. ^String mmap-path)]
-          (when (.exists f)
-            (.delete f)))))
+    ;; Clean up the temp file, but only one we generated ourselves. This used
+    ;; to test whether the path started with java.io.tmpdir, which matches any
+    ;; caller-supplied :mmap-dir under /tmp and deleted the caller's branch
+    ;; files behind their back - asynchronously, so it also raced whatever they
+    ;; did next with that branch. A caller-supplied file is a cache meant to be
+    ;; reused on the next open; it is not ours to remove.
+    (when (:owns-mmap-file? vs)
+      (java.nio.file.Files/deleteIfExists (.toPath (File. ^String (:mmap-path vs)))))
     nil))
 
 (defn get-segment

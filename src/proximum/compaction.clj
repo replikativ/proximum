@@ -325,7 +325,29 @@
   "Clean up partial compaction state on failure.
    Closes the new index and attempts to delete created files."
   [state]
-  (let [{:keys [store-config mmap-dir]} (get-in state [:config :target])]
+  ;; (.-config state), not (get-in state [:config ...]): CompactionState's valAt
+  ;; is a pure external-ID lookup that delegates to the source index, so the
+  ;; keyword form returned nil and this whole cleanup - mmap files AND storage
+  ;; keys - silently did nothing. It looked like it worked because
+  ;; vectors/close! used to delete any mmap under java.io.tmpdir.
+  (let [{:keys [store-config mmap-dir]} (:target (.-config state))
+        source-idx (.-source-idx state)
+        source-mmap-dir (p/mmap-dir source-idx)
+        ;; This cleanup recursively deletes mmap-dir and dissocs :index/config,
+        ;; :main and :branches from the store. That is correct for a scratch
+        ;; target and catastrophic for the source, and nothing upstream checks
+        ;; that the two differ. It never mattered while this whole function was
+        ;; a no-op; it does now.
+        same-dir? (and mmap-dir source-mmap-dir
+                       (= (.getCanonicalPath (io/file mmap-dir))
+                          (.getCanonicalPath (io/file source-mmap-dir))))
+        mmap-dir (when-not same-dir? mmap-dir)
+        store-config (when-not same-dir? store-config)]
+    (when same-dir?
+      (log/warn :proximum/compaction
+                "Compaction target shares the source's mmap-dir - skipping cleanup"
+                {:mmap-dir source-mmap-dir
+                 :hint "Give the compaction target its own :mmap-dir and :store-config"}))
     ;; Close new index (must await async close! before deleting files)
     (when-let [batch-state (.-batch-state state)]
       (when-let [new-idx (:idx @batch-state)]
