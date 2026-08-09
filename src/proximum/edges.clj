@@ -35,7 +35,6 @@
    - Only hot chunks stay in memory, cold chunks reload on demand"
   (:require [konserve.core :as k]
             [clojure.core.async :as a]
-            [proximum.logging :as log]
             [hasch.core :as hasch])
   (:import [proximum.internal PersistentEdgeIndex ChunkStorage]
            [java.nio ByteBuffer ByteOrder]
@@ -177,17 +176,21 @@
                           :chunk-hashes (if crypto-hash?
                                           (conj chunk-hashes storage-addr)
                                           chunk-hashes)})
-                       ;; A dirty position that resolves to no chunk cannot be
-                       ;; persisted. Keep its previous address in the map (see
-                       ;; address-map below) so the last good copy stays
-                       ;; referenced and reachable for GC, and say so loudly -
-                       ;; silently dropping it would truncate the restored graph.
-                       (do
-                         (log/warn :proximum/edges "Dirty chunk resolved to nil - not persisted"
-                                   {:position pos
-                                    :layer (PersistentEdgeIndex/decodeLayer pos)
-                                    :chunk-idx (PersistentEdgeIndex/decodeChunkIdx pos)})
-                         {:channels channels :new-addrs new-addrs :chunk-hashes chunk-hashes})))
+                       ;; A position is dirty precisely because its content
+                       ;; changed, so failing to resolve it leaves no good
+                       ;; option: dropping it from the address map truncates the
+                       ;; restored graph, and keeping the old address restores
+                       ;; pre-modification bytes that nothing downstream can
+                       ;; detect - verify-edges-from-cold re-hashes the blob and
+                       ;; happily matches its own address. Both corrupt silently,
+                       ;; so refuse the sync instead. Unreachable today: every
+                       ;; dirty position names a chunk this instance or an
+                       ;; ancestor allocated, and fork clones the chunk arrays.
+                       (throw (ex-info "Dirty edge chunk could not be resolved - refusing to sync"
+                                       {:position pos
+                                        :layer (PersistentEdgeIndex/decodeLayer pos)
+                                        :chunk-idx (PersistentEdgeIndex/decodeChunkIdx pos)
+                                        :hint "The chunk was marked modified but is no longer in memory or storage"}))))
                    {:channels #{} :new-addrs {} :chunk-hashes []}
                    dirty-positions)
            new-addresses (:new-addrs result)

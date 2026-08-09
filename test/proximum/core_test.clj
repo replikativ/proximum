@@ -616,11 +616,34 @@
                 "Forked PES should inherit the parent's dirty set")
 
             ;; ... while owning none of them: writing through the fork must
-            ;; copy-on-write, leaving the parent's graph untouched.
-            (let [parent-edges (.countEdges ^PersistentEdgeIndex pes2)]
-              (core/insert forked (random-vec 32) 999)
-              (is (= parent-edges (.countEdges ^PersistentEdgeIndex pes2))
-                  "Insert through the fork must not mutate the parent's graph")))
+            ;; copy-on-write, leaving the parent's graph untouched. Drive the
+            ;; edge index directly - core/insert forks again, so it would pass
+            ;; even with ownership tracking removed entirely.
+            (let [^PersistentEdgeIndex parent-pes pes2
+                  ^PersistentEdgeIndex fork-pes pes-forked
+                  node 0
+                  before (vec (.getNeighbors parent-pes 0 (int node)))]
+              (is (seq before) "precondition: the parent has neighbours to clobber")
+              (.asTransient fork-pes)
+              (.setNeighbors fork-pes 0 (int node) (int-array [7 8 9]))
+              (.asPersistent fork-pes)
+              (is (= before (vec (.getNeighbors parent-pes 0 (int node))))
+                  "writing through the fork must copy first, not mutate shared state")
+              (is (= [7 8 9] (vec (.getNeighbors fork-pes 0 (int node))))
+                  "and the fork must see its own write"))
+
+            ;; The reverse direction: once forked, the parent no longer owns its
+            ;; chunks either, so a write through the PARENT must not be visible
+            ;; through the fork.
+            (let [^PersistentEdgeIndex parent-pes pes2
+                  ^PersistentEdgeIndex fork-pes pes-forked
+                  node 1
+                  fork-before (vec (.getNeighbors fork-pes 0 (int node)))]
+              (.asTransient parent-pes)
+              (.setNeighbors parent-pes 0 (int node) (int-array [4 5 6]))
+              (.asPersistent parent-pes)
+              (is (= fork-before (vec (.getNeighbors fork-pes 0 (int node))))
+                  "a write through the parent must not leak into the fork")))
 
           (a/<!! (core/close! idx2))))
 

@@ -348,6 +348,16 @@ public final class PersistentEdgeIndex {
         long[] oldDeleted = deletedNodes.get();
         long[] newDeleted = oldDeleted != null ? oldDeleted.clone() : null;
 
+        // Forking publishes every one of our chunks to the child, so we no
+        // longer own any of them exclusively: a later in-place write through
+        // this instance would be visible through the fork. Give up ownership so
+        // any such write copies first.
+        //
+        // Before ownership was tracked separately, clearDirty() happened to do
+        // this after every sync; nothing else does it now, so it has to happen
+        // here - and here is in fact the correct moment.
+        ownedChunks.clear();
+
         return new PersistentEdgeIndex(
             maxNodes, maxLevel, M, M0,
             slotsPerNode, slotsPerNodeUpper, numChunks,
@@ -874,18 +884,22 @@ public final class PersistentEdgeIndex {
                     }
                 }
             } else if (!ownedChunks.contains(chunkAddr)) {
-                // Chunk is inherited from fork - must CoW before mutation
+                // Chunk is inherited from fork - must CoW before mutation.
+                // Everything here happens under the lock: re-read the current
+                // chunk (never clone the pre-lock read, which may already be
+                // stale), and claim ownership before releasing, so a racing
+                // thread cannot clone again over the first thread's write.
                 synchronized (allocLocks[chunkIdx & ALLOC_LOCK_MASK]) {
-                    // Re-check under lock
                     if (!ownedChunks.contains(chunkAddr)) {
-                        chunk = oldChunk.clone();
+                        chunk = chunks[chunkIdx].clone();
                         chunks[chunkIdx] = chunk;
+                        ownedChunks.add(chunkAddr);
                     } else {
                         chunk = chunks[chunkIdx];
                     }
                 }
             } else {
-                chunk = oldChunk;
+                chunk = chunks[chunkIdx];
             }
         } else {
             // Persistent mode - CoW BEFORE any mutation
@@ -968,21 +982,22 @@ public final class PersistentEdgeIndex {
                     }
                 }
             } else if (!ownedChunks.contains(chunkAddr)) {
-                // Chunk is inherited from fork - must CoW before mutation
+                // Chunk is inherited from fork - must CoW before mutation.
+                // As on layer 0: re-read under the lock rather than cloning the
+                // pre-lock read, and claim ownership before releasing it.
                 synchronized (allocLocks[(layerIdx * 31 + chunkIdx) & ALLOC_LOCK_MASK]) {
-                    // Re-check under lock
+                    layerChunks = upper[layerIdx];
                     if (!ownedChunks.contains(chunkAddr)) {
-                        chunk = oldChunk.clone();
-                        oldLayerChunks[chunkIdx] = chunk;
-                        layerChunks = oldLayerChunks;
+                        chunk = layerChunks[chunkIdx].clone();
+                        layerChunks[chunkIdx] = chunk;
+                        ownedChunks.add(chunkAddr);
                     } else {
-                        layerChunks = upper[layerIdx];
                         chunk = layerChunks[chunkIdx];
                     }
                 }
             } else {
-                layerChunks = oldLayerChunks;
-                chunk = oldChunk;
+                layerChunks = upper[layerIdx];
+                chunk = layerChunks[chunkIdx];
             }
         } else {
             // Persistent mode - CoW BEFORE any mutation
@@ -1444,6 +1459,22 @@ public final class PersistentEdgeIndex {
      */
     public void clearDirty() {
         dirtyChunks.clear();
+    }
+
+    /**
+     * Clear the dirty marks for exactly the given positions.
+     *
+     * <p>Prefer this over {@link #clearDirty()} after a flush: a flush covers
+     * the positions that were dirty when it started, and clearing the whole set
+     * would also drop anything dirtied while its writes were in flight - marking
+     * those chunks clean without ever persisting them.</p>
+     *
+     * @param positions Encoded chunk positions that were successfully persisted
+     */
+    public void clearDirty(java.util.Collection<Long> positions) {
+        if (positions != null) {
+            dirtyChunks.removeAll(positions);
+        }
     }
 
     /**
