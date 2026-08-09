@@ -847,13 +847,15 @@
           edge-store (:edge-store (.-state idx))
           pes (.-pes-edges idx)
           _ (vectors/flush-write-buffer-async! vs)
+          flushed-positions (atom nil)
           new-address-map
           (if edge-store
-            (if-let [{:keys [channels address-map]}
+            (if-let [{:keys [channels address-map] :as flush-result}
                      (edges/flush-dirty-chunks-async! edge-store pes (:address-map (.-state idx))
                                                       {:crypto-hash? (:crypto-hash? (.-state idx))})]
               (do
                 (swap! (:pending-edge-writes (.-state idx)) into channels)
+                (reset! flushed-positions (:flushed-positions flush-result))
                 address-map)
               (:address-map (.-state idx)))
             (:address-map (.-state idx)))
@@ -877,9 +879,9 @@
               (a/<! ch))
             (swap! edge-pending #(reduce disj % edge-channels-to-wait)))
 
-          ;; Clear dirty
+          ;; Clear dirty marks for exactly what this flush persisted
           (when edge-store
-            (.clearDirty ^PersistentEdgeIndex pes))
+            (.clearDirty ^PersistentEdgeIndex pes ^java.util.Collection @flushed-positions))
 
           ;; Return updated index with new address-map
           (update-hnsw-index idx {:address-map new-address-map
@@ -974,9 +976,10 @@
                                  (swap! (:pending-chunk-hashes vs)
                                         #(vec (drop (count vectors-pending-hashes) %))))
 
-             ;; Clear dirty edges
+             ;; Clear dirty marks for exactly what this flush persisted
                                (when edge-store
-                                 (.clearDirty ^PersistentEdgeIndex pes))
+                                 (.clearDirty ^PersistentEdgeIndex pes
+                                              ^java.util.Collection (:flushed-positions edges-async-result)))
 
              ;; 7. Store all PSS structures and create commit
                                (if-let [store (:storage state)]
