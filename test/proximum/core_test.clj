@@ -3,6 +3,7 @@
             [proximum.core :as core]
             [proximum.protocols :as p]
             [proximum.hnsw.internal :as hnsw.i] ;; Only for address-map (no protocol equivalent)
+            [proximum.vectors :as vectors]
             [proximum.versioning :as versioning]
             [clojure.set :as set]
             [clojure.core.async :as a])
@@ -163,6 +164,84 @@
 
 ;; -----------------------------------------------------------------------------
 ;; Metadata tests
+
+(deftest test-insert-batch-honours-parallelism
+  ;; insert-batch accepted :parallelism and never read it - the body always used
+  ;; the shared pool - so the documented option did nothing and there was no way
+  ;; to ask for a sequential, reproducible build.
+  ;;
+  ;; :max-levels 0 pins every node to level 0, so level assignment is fixed even
+  ;; without a construction seed; the only nondeterminism left is the parallel
+  ;; neighbour-selection race. That makes this a direct test of the option.
+  (testing ":parallelism 1 builds sequentially and reproducibly"
+    (let [vecs (random-vectors 400 16)
+          topology (fn [parallelism]
+                     (let [idx (create-test-index {:type :hnsw :dim 16 :M 8
+                                                   :ef-construction 50 :capacity 1000
+                                                   :max-levels 0
+                                                   :store-config {:backend :memory
+                                                                  :id (java.util.UUID/randomUUID)}})
+                           built (core/insert-batch idx vecs (range 400) {:parallelism parallelism})
+                           ^PersistentEdgeIndex pes (p/edge-storage built)]
+                       (mapv #(vec (or (.getNeighbors pes 0 (int %)) [])) (range 400))))]
+      ;; Only the positive direction is asserted. "the parallel path differs"
+      ;; holds on this machine and is how the fix was verified by hand, but it
+      ;; needs the pool to actually race - on a single-core runner it would be
+      ;; deterministic too, and the assertion would fail for a reason that has
+      ;; nothing to do with the code. Not worth adding a flaky test to prove a
+      ;; premise.
+      (is (= (topology 1) (topology 1) (topology 1))
+          ":parallelism 1 must produce the same graph every time"))))
+
+(deftest test-seeded-sequential-build-is-reproducible
+  ;; The contract a caller actually wants: how do I get the same index twice?
+  ;; It needs both halves - :seed fixes level assignment, :parallelism 1 removes
+  ;; the neighbour-selection race - and neither alone is enough.
+  (testing ":seed plus :parallelism 1 reproduces the graph"
+    (let [vecs (random-vectors 300 16)
+          topology (fn [parallelism]
+                     (let [idx (create-test-index {:type :hnsw :dim 16 :M 8
+                                                   :ef-construction 50 :capacity 1000
+                                                   :seed 42
+                                                   :store-config {:backend :memory
+                                                                  :id (java.util.UUID/randomUUID)}})
+                           built (core/insert-batch idx vecs (range 300) {:parallelism parallelism})
+                           ^PersistentEdgeIndex pes (p/edge-storage built)]
+                       (mapv #(vec (or (.getNeighbors pes 0 (int %)) [])) (range 300))))]
+      (is (= (topology 1) (topology 1) (topology 1))
+          "seeded and sequential must be reproducible"))))
+
+(deftest test-capacity-default-fits-the-mapping
+  ;; The mmap is mapped through FileChannel.map, so the file must fit in an int.
+  ;; A flat default of 10,000,000 exceeded that for any dim above 53 - i.e. for
+  ;; every real embedding model - and failed at create time with the JDK's
+  ;; "Size exceeds Integer.MAX_VALUE", naming neither dim nor capacity.
+  (testing "the default capacity is whatever fits for the given dim"
+    (doseq [dim [768 1536]]
+      (let [idx (create-test-index {:type :hnsw :dim dim
+                                    :store-config {:backend :memory
+                                                   :id (java.util.UUID/randomUUID)}})]
+        (is (= (vectors/max-capacity-for-dim dim)
+               (:capacity (core/index-metrics idx)))
+            (str "dim " dim " should default to the largest mappable capacity")))))
+
+  (testing "a dim small enough keeps the 10M default"
+    (let [idx (create-test-index {:type :hnsw :dim 32
+                                  :store-config {:backend :memory
+                                                 :id (java.util.UUID/randomUUID)}})]
+      (is (= 10000000 (:capacity (core/index-metrics idx))))))
+
+  (testing "an explicit capacity that cannot be mapped is refused with a useful error"
+    (let [ex (try (create-test-index {:type :hnsw :dim 768 :capacity 10000000
+                                      :store-config {:backend :memory
+                                                     :id (java.util.UUID/randomUUID)}})
+                  nil
+                  (catch clojure.lang.ExceptionInfo e e))]
+      (is (some? ex) "must not fail later inside the JDK instead")
+      (is (re-find #"does not fit in a single memory mapping" (ex-message ex)))
+      (is (= 768 (:dim (ex-data ex))))
+      (is (= (vectors/max-capacity-for-dim 768) (:max-capacity-for-dim (ex-data ex)))
+          "the error should say what the limit actually is"))))
 
 (deftest test-metadata
   (let [path (temp-path)]

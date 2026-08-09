@@ -293,12 +293,23 @@ public final class HnswInsert {
         edges.asTransient();
 
         try {
-            // Use physical core executor for NUMA-aware parallelism
-            // Only uses physical cores (not hyperthreads) to avoid memory bandwidth contention
-            // On a 64-thread dual-socket EPYC, this uses 32 threads instead of 63
-            ForkJoinPool pool = PhysicalCoreExecutor.pool();
-            pool.invoke(new InsertTask(seg, edges, vectors, nodeIds, dim, nodeLevels, efConstruction, 0, vectors.length, distanceType));
-            // Don't shutdown - it's a shared static pool
+            if (parallelism <= 1) {
+                // Sequential on the calling thread. This argument used to be
+                // accepted and ignored, so parallelism=1 silently ran the
+                // parallel path - and with it the neighbour-selection races
+                // that make a batch build non-reproducible. Honouring it gives
+                // callers a way to ask for a deterministic build.
+                for (int i = 0; i < vectors.length; i++) {
+                    insertInternal(seg, edges, vectors[i], nodeIds[i], dim, nodeLevels[i], efConstruction, distanceType);
+                }
+            } else {
+                // Use physical core executor for NUMA-aware parallelism
+                // Only uses physical cores (not hyperthreads) to avoid memory bandwidth contention
+                // On a 64-thread dual-socket EPYC, this uses 32 threads instead of 63
+                ForkJoinPool pool = PhysicalCoreExecutor.pool();
+                pool.invoke(new InsertTask(seg, edges, vectors, nodeIds, dim, nodeLevels, efConstruction, 0, vectors.length, distanceType));
+                // Don't shutdown - it's a shared static pool
+            }
         } finally {
             // Seal back to persistent mode
             edges.asPersistent();
