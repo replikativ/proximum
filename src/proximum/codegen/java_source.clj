@@ -509,6 +509,7 @@
       (= type-name "map") "Map<String, Object>"
       (= type-name "uuid") "UUID"
       (= type-name "DistanceMetric") "DistanceMetric"
+      (= type-name "int") "Long"  ;; boxed: :int fields are optional/nullable
       (and (vector? schema) (= :maybe (first schema)))
       (let [inner (config-field->java-type (second schema))]
         ;; Make primitive types nullable
@@ -593,6 +594,47 @@
                    "            return this;\n"
                    "        }"))))
 
+(defn- generate-builder-config-puts
+  "Generate the configMap.put(...) block for build().
+
+   Schema-driven on purpose: this block used to be hardcoded, so every field
+   added to HnswConfig got a field and a setter but was silently dropped on the
+   way into the config map - the setter compiled and did nothing.
+
+   Value types are always put; reference types are put only when non-null, so
+   an unset optional stays absent and Clojure's own default applies."
+  []
+  (let [fields (extract-config-fields)
+        primitive? #(contains? #{"int" "boolean" "double" "long"} %)
+        put-expr (fn [{:keys [name java-name java-type]}]
+                   (let [kw (str "\":" (clojure.core/name name) "\"")
+                         value (cond
+                                 (= java-type "DistanceMetric")
+                                 (str "\":\" + " java-name ".name().toLowerCase()")
+
+                                 (= name :branch)
+                                 (str "\":\" + " java-name)
+
+                                 :else java-name)]
+                     (str "configMap.put(" kw ", " value ");")))
+        always (remove #(-> % :java-type primitive? not) fields)
+        ;; branch and distance carry defaults and are never null
+        always (concat always (filter #(#{:branch :distance} (:name %)) fields))
+        nullable (remove #(or (primitive? (:java-type %))
+                              (#{:branch :distance} (:name %)))
+                         fields)]
+    (str (str/join "\n"
+                   (for [f (sort-by (fn [f] (.indexOf ^java.util.List (vec (map :name fields))
+                                                      (:name f)))
+                                    always)]
+                     (str "            " (put-expr f))))
+         "\n"
+         (str/join "\n"
+                   (for [f nullable]
+                     (str "            if (" (:java-name f) " != null) {\n"
+                          "                " (put-expr f) "\n"
+                          "            }"))))))
+
 (defn- generate-builder-config-map
   "Generate the config map construction in build()."
   []
@@ -676,31 +718,10 @@
             }
             ensureInitialized();
 
-            // Build config map
+            // Build config map (generated from the HnswConfig schema)
             Map<String, Object> configMap = new HashMap<>();
             configMap.put(\":type\", \":hnsw\");
-            configMap.put(\":dim\", dim);
-            configMap.put(\":M\", M);
-            configMap.put(\":ef-construction\", efConstruction);
-            configMap.put(\":ef-search\", efSearch);
-            configMap.put(\":capacity\", capacity);
-            configMap.put(\":distance\", \":\" + distance.name().toLowerCase());
-            configMap.put(\":branch\", \":\" + branch);
-            configMap.put(\":crypto-hash?\", cryptoHash);
-            configMap.put(\":chunk-size\", chunkSize);
-            configMap.put(\":cache-size\", cacheSize);
-            if (storeConfig != null) {
-                configMap.put(\":store-config\", storeConfig);
-            }
-            if (mmapDir != null) {
-                configMap.put(\":mmap-dir\", mmapDir);
-            }
-            if (mmapPath != null) {
-                configMap.put(\":mmap-path\", mmapPath);
-            }
-            if (maxLevels != null) {
-                configMap.put(\":max-levels\", maxLevels);
-            }
+" (generate-builder-config-puts) "
 
             Object result = createIndexFn.invoke(toClojureMap(configMap));
             return new ProximumVectorStore(result, null);

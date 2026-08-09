@@ -60,12 +60,16 @@
           layout1 (storage-layout base1)
           layout2 (storage-layout base2)]
       (try
-        ;; Create two identical indices
+        ;; Create two identical indices. The shared :seed is what makes them
+        ;; identical: without it, level assignment is drawn from an unseeded
+        ;; RNG, the two graphs differ, and so do the hashes over their
+        ;; serialized edges - this test failed a few percent of runs.
         (let [idx1 (core/create-index {:type :hnsw
                                        :dim 4
                                        :capacity 100
                                        :M 8
                                        :crypto-hash? true
+                                       :seed 42
                                        :store-config (file-store-config (:store-path layout1))
                                        :mmap-dir (:mmap-dir layout1)})
               idx2 (core/create-index {:type :hnsw
@@ -73,6 +77,7 @@
                                        :capacity 100
                                        :M 8
                                        :crypto-hash? true
+                                       :seed 42
                                        :store-config (file-store-config (:store-path layout2))
                                        :mmap-dir (:mmap-dir layout2)})]
 

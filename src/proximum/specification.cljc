@@ -233,7 +233,16 @@
     pos-int?]
    [:max-levels {:optional true
                  :doc "Maximum HNSW levels (auto-calculated if not set)."}
-    [:maybe nat-int?]]])
+    [:maybe nat-int?]]
+   [:seed {:optional true
+           :doc (str "Construction seed for reproducible indexes. When set, a node's HNSW level "
+                     "is a pure function of (seed, node id), so rebuilding the same vectors in the "
+                     "same order yields the same graph - and, under :crypto-hash?, the same commit "
+                     "hashes. Unset (the default), levels come from an unseeded RNG and two indexes "
+                     "over identical data will differ. Note that reproducing a whole graph also "
+                     "requires sequential inserts: parallel insert-batch races on neighbour "
+                     "selection regardless of the seed.")}
+    [:maybe :int]]])
 
 (def IndexConfig
   "Polymorphic index configuration - dispatches on :type."

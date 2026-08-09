@@ -970,6 +970,40 @@ public final class HnswInsert {
         return (maxLevel >= 0) ? Math.min(level, maxLevel) : level;
     }
 
+    /**
+     * Generate a node's level deterministically from an index seed and the
+     * node's id, using the same exponential distribution as
+     * {@link #randomLevel(double, int)}.
+     *
+     * <p>Stateless by design: the level is a pure function of (seed, nodeId),
+     * so it does not depend on insertion order, thread interleaving, or how the
+     * index was forked. The same seed therefore reproduces the same level for
+     * the same node id in any run.</p>
+     *
+     * <p>Note that reproducing an entire <em>graph</em> additionally requires
+     * inserting sequentially: parallel batch insert races on neighbour
+     * selection, which stable levels alone do not constrain.</p>
+     *
+     * @param ml       level multiplier (1 / ln(M))
+     * @param maxLevel level cap, or negative for uncapped
+     * @param seed     the index's construction seed
+     * @param nodeId   the node being assigned a level
+     */
+    public static int randomLevel(double ml, int maxLevel, long seed, int nodeId) {
+        // SplitMix64 finalizer - cheap, stateless, well-distributed.
+        long z = seed + 0x9E3779B97F4A7C15L * (nodeId + 1L);
+        z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L;
+        z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL;
+        z = z ^ (z >>> 31);
+        // 53-bit uniform in [0, 1); nudge off zero so log() stays finite.
+        double u = (z >>> 11) * 0x1.0p-53;
+        if (u <= 0.0) {
+            u = 0x1.0p-53;
+        }
+        int level = (int) Math.floor(-Math.log(u) * ml);
+        return (maxLevel >= 0) ? Math.min(level, maxLevel) : level;
+    }
+
     // =========================================================================
     // Delete with Graph Repair
     // =========================================================================

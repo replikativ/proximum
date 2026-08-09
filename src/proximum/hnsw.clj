@@ -391,6 +391,18 @@
     (aclone ^floats v)
     (float-array v)))
 
+(defn- node-level-for
+  "Draw the HNSW level for a node.
+
+   With a :seed the level is a pure function of (seed, node-id), so an index
+   built from the same vectors in the same order reproduces the same graph -
+   and therefore the same content hashes. Without one, levels come from an
+   unseeded ThreadLocalRandom as before."
+  ^long [seed ml max-levels node-id]
+  (if seed
+    (HnswInsert/randomLevel (double ml) (int max-levels) (long seed) (int node-id))
+    (HnswInsert/randomLevel (double ml) (int max-levels))))
+
 (defn- distance-keyword->type
   "Convert distance keyword to integer type for Java HNSW.
 
@@ -626,7 +638,7 @@
            pes-edges (.-pes-edges idx)
            dim (.-dim idx)
            distance-type (.-distance-type idx)
-           {:keys [metadata external-id-index M ef-construction ml max-levels]} state
+           {:keys [metadata external-id-index M ef-construction ml max-levels seed]} state
            cap (vectors/capacity vectors)
            cnt (vectors/count-vectors vectors)
            use-cosine? (= distance-type 1)]
@@ -641,7 +653,7 @@
              _ (when use-cosine?
                  (HnswInsert/normalizeVector float-arr))
              node-id (vectors/append! vectors float-arr)
-             node-level (HnswInsert/randomLevel ml (or max-levels 16))
+             node-level (node-level-for seed ml (or max-levels 16) node-id)
              ^MemorySegment seg (vectors/get-segment vectors)
              ;; HnswInsert/insert handles transient mode internally
              _ (HnswInsert/insert seg new-pes float-arr (int node-id)
@@ -664,7 +676,7 @@
            pes-edges (.-pes-edges idx)
            dim (.-dim idx)
            distance-type (.-distance-type idx)
-           {:keys [metadata external-id-index M ef-construction ml max-levels]} state
+           {:keys [metadata external-id-index M ef-construction ml max-levels seed]} state
            {:keys [parallelism] :or {parallelism (.availableProcessors (Runtime/getRuntime))}} opts
            metadata-vec (:metadata opts)
            n (count vecs)
@@ -685,7 +697,8 @@
                  (HnswInsert/normalizeVectors float-vecs))
              node-ids (int-array (map (fn [v] (vectors/append! vectors v)) float-vecs))
              max-level-limit (or max-levels 16)
-             node-levels (int-array (map (fn [_] (HnswInsert/randomLevel ml max-level-limit)) vecs))
+             node-levels (int-array (map (fn [node-id] (node-level-for seed ml max-level-limit node-id))
+                                         node-ids))
              ^MemorySegment seg (vectors/get-segment vectors)
              ;; HnswInsert/insertBatch handles transient mode internally
              _ (HnswInsert/insertBatch seg new-pes float-vecs node-ids
@@ -1075,7 +1088,11 @@
        :ef-search (:ef-search state)
        :distance (:distance state)
        :max-levels (:max-levels state)
-       :crypto-hash? (:crypto-hash? state)})))
+       :crypto-hash? (:crypto-hash? state)
+       ;; Must round-trip: compaction rebuilds the index from this map, and
+       ;; dropping the seed here would silently downgrade a reproducible index
+       ;; to a nondeterministic one.
+       :seed (:seed state)})))
 
 ;; IndexState protocol implementation
 (extend-type HnswIndex
@@ -1194,7 +1211,7 @@
 (defmethod p/create-index :hnsw
   [{:keys [dim M ef-construction ef-search distance capacity
            max-levels chunk-size cache-size branch crypto-hash?
-           store store-config mmap-dir mmap-path]
+           seed store store-config mmap-dir mmap-path]
     :or {M 16
          distance :euclidean
          capacity 10000000
@@ -1205,6 +1222,14 @@
          crypto-hash? false}}]
   (when-not dim
     (throw (ex-info ":dim is required" {})))
+  ;; Checked here rather than at first insert: the seed is written into the
+  ;; immutable config, so a bad value would be persisted and then throw on
+  ;; every insert against a store that cannot be corrected.
+  (when-not (or (nil? seed) (integer? seed))
+    (throw (ex-info ":seed must be an integer or nil"
+                    {:seed seed
+                     :type (type seed)
+                     :hint "The seed is mixed with node ids to derive HNSW levels"})))
   (let [store-config (when store-config (normalize-store-config store-config))
         M0 (* 2 M)
         ml (/ 1.0 (Math/log M))
@@ -1236,7 +1261,20 @@
                       :max-level max-level-int
                       :chunk-size chunk-size
                       :distance distance
-                      :crypto-hash? crypto-hash?}
+                      :crypto-hash? crypto-hash?
+                      ;; Construction parameters belong here, not in the branch
+                      ;; snapshot: they are immutable for the life of the index
+                      ;; and every insert depends on them. restore-index used to
+                      ;; read them from the snapshot, which never carried them,
+                      ;; so a reloaded index silently switched to ml=0.36067 and
+                      ;; ef-construction=200 whatever it was built with.
+                      :ml ml
+                      :ef-construction ef-c
+                      :ef-search ef-s
+                      ;; Immutable like the rest of this map: the seed governs
+                      ;; level assignment, so changing it after the fact would
+                      ;; make later inserts inconsistent with earlier ones.
+                      :seed seed}
                      {:sync? true}))
         _ (when base-store
             (k/update base-store :branches #(conj (or % #{}) branch) {:sync? true}))
@@ -1258,6 +1296,7 @@
       :ef-search ef-s
       :ml ml
       :max-levels max-levels
+      :seed seed
       :dim dim
       :distance distance
       :distance-type (distance-keyword->type distance)
@@ -1288,7 +1327,7 @@
                         :or {cache-size 10000}}]
   (let [;; Read immutable config from :index/config
         config (k/get edge-store :index/config nil {:sync? true})
-        {:keys [dim M M0 max-nodes max-level chunk-size distance crypto-hash?]} config
+        {:keys [dim M M0 max-nodes max-level chunk-size distance crypto-hash? seed]} config
         ;; Every field below is required to rebuild the index. Without this
         ;; check a partial config surfaces as an NPE from deep inside the mmap
         ;; or edge-index construction, after those have already allocated.
@@ -1305,6 +1344,17 @@
                             {:missing (vec missing)
                              :config config
                              :hint "The store's :index/config key is absent or was written by an incompatible version"})))
+        ;; Construction parameters, from :index/config where create-index now
+        ;; records them. Stores written before that derive the same values
+        ;; create-index would have computed, so no migration is needed - and
+        ;; anything is better than the old behaviour of silently substituting
+        ;; ml=0.36067 / ef=200 for whatever the index was actually built with.
+        ;; Not in the required list above for that reason: absence is handled.
+        restored-ml (or (:ml config) (/ 1.0 (Math/log M)))
+        restored-ef-construction (or (:ef-construction config)
+                                     (recommended-ef-construction max-nodes M))
+        restored-ef-search (or (:ef-search config)
+                               (recommended-ef-search 10 max-nodes))
 
         ;; Read mutable state from branch snapshot
         {:keys [metadata-pss-root external-id-pss-root
@@ -1391,10 +1441,11 @@
       :external-id-index external-id-pss
       :M M
       :M0 M0
-      :ef-construction (:ef-construction snapshot 200)
-      :ef-search (:ef-search snapshot 200)
-      :ml (:ml snapshot 0.36067)
+      :ef-construction restored-ef-construction
+      :ef-search restored-ef-search
+      :ml restored-ml
       :max-levels max-level
+      :seed seed
       :dim dim
       :distance distance
       :distance-type (distance-keyword->type distance)
