@@ -637,13 +637,19 @@
                         (.-config state) (.-_meta state))))
 
   (close! [state]
-    ;; Cancel copy if still running, close both indices
+    ;; Cancel copy if still running, close both indices.
+    ;; Returns a channel like every other close!: returning nil made
+    ;; (a/<!! (p/close! x)) - which the compaction abort path itself does -
+    ;; throw for this type.
     (future-cancel (.-copy-future state))
-    (p/close! (.-source-idx state))
-    (when-let [batch-state (.-batch-state state)]
-      (when-let [new-idx (:idx @batch-state)]
-        (p/close! new-idx)))
-    nil))
+    (let [source-ch (p/close! (.-source-idx state))
+          new-ch (when-let [batch-state (.-batch-state state)]
+                   (when-let [new-idx (:idx @batch-state)]
+                     (p/close! new-idx)))]
+      (a/go
+        (when source-ch (a/<! source-ch))
+        (when new-ch (a/<! new-ch))
+        nil))))
 
 ;; IndexIntrospection implementation for CompactionState
 (extend-type CompactionState
@@ -678,6 +684,9 @@
 
   (mmap-dir [state]
     (p/mmap-dir (.-source-idx state)))
+
+  (unsynced-metadata? [state]
+    (p/unsynced-metadata? (.-source-idx state)))
 
   (reflink-supported? [state]
     (p/reflink-supported? (.-source-idx state)))

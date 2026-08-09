@@ -16,10 +16,34 @@
       (doseq [f (reverse (file-seq dir))]
         (.delete f)))))
 
+(def ^:private created-dirs
+  "Every temp dir handed out this test run, so the fixture can remove them."
+  (atom []))
+
 (defn- temp-dir []
   (let [path (str "/tmp/proximum-ygg-test-" (System/nanoTime))]
     (.mkdirs (File. path))
+    (swap! created-dirs conj path)
     path))
+
+(defn- clean-temp-dirs
+  "Remove the temp dirs each test created.
+
+   delete-dir-recursive was written and never wired to a fixture, so every run
+   left its /tmp/proximum-ygg-test-* trees behind - a few dozen per run, and
+   tens of thousands over a long soak. The mmap files inside them are no longer
+   deleted on close! either (a caller-supplied file is not ours to remove), so
+   they are not small."
+  [f]
+  (reset! created-dirs [])
+  (try
+    (f)
+    (finally
+      (doseq [path @created-dirs]
+        (delete-dir-recursive path))
+      (reset! created-dirs []))))
+
+(use-fixtures :each clean-temp-dirs)
 
 (defn- random-vector [dim]
   (float-array (repeatedly dim #(float (- (rand) 0.5)))))

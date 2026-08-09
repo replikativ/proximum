@@ -833,7 +833,12 @@
   (set-metadata [idx id metadata]
     (let [state (.-state idx)
           new-metadata (meta/set-metadata (:metadata state) id metadata)]
-      (update-hnsw-index idx {:metadata new-metadata})))
+      ;; Flag it: a metadata edit changes no count, so branch!'s
+      ;; unsynced-changes check - which compares vector and deleted counts
+      ;; against the snapshot - cannot see it, and the new branch would silently
+      ;; be missing the edit. sync! clears the flag.
+      (update-hnsw-index idx {:metadata new-metadata
+                              :unsynced-metadata? true})))
 
   (capacity [idx]
     (vectors/capacity (.-vectors idx)))
@@ -1088,7 +1093,9 @@
                                                              ;; This index now IS the branch
                                                              ;; head, so further syncs are
                                                              ;; fast-forwards.
-                                                             :restored-from-commit commit-id})))
+                                                             :restored-from-commit commit-id
+                                                             ;; The metadata PSS was just stored
+                                                             :unsynced-metadata? false})))
 
                ;; No storage - just return index with updated address-map
                                  (update-hnsw-index idx {:address-map new-address-map})))
@@ -1149,6 +1156,9 @@
 
   (crypto-hash? [idx]
     (:crypto-hash? (.-state idx)))
+
+  (unsynced-metadata? [idx]
+    (boolean (:unsynced-metadata? (.-state idx))))
 
   (external-id-index [idx]
     (:external-id-index (.-state idx)))

@@ -91,7 +91,12 @@
     "Force pending writes to storage without creating a commit.")
 
   (close! [idx]
-    "Close the index and release resources (mmap, file handles)."))
+    "Close the index and release resources (mmap, file handles).
+
+     Returns a channel that delivers when cleanup is complete. Callers may
+     ignore it, but implementations must return one: callers do `(a/<!! (close!
+     idx))` to be sure the mmap is unmapped before touching the file, and
+     `(a/<!! nil)` throws."))
 
 ;; -----------------------------------------------------------------------------
 ;; IndexIntrospection Protocol - Type and config introspection
@@ -147,6 +152,13 @@
   (crypto-hash? [idx]
     "Check if index has content-addressed commit hashing enabled.
      When true, commits are identified by their merkle hash.")
+
+  (unsynced-metadata? [idx]
+    "True when metadata has been edited since the last sync.
+
+     Metadata edits move no vector or deleted count, so callers that decide
+     whether an index is safe to fork by comparing counts against the snapshot
+     cannot see them on their own.")
 
   (external-id-index [idx]
     "Get the external-id index (maps external IDs to internal node IDs).
