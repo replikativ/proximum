@@ -193,6 +193,24 @@
       (is (= (topology 1) (topology 1) (topology 1))
           ":parallelism 1 must produce the same graph every time"))))
 
+(deftest test-seeded-sequential-build-is-reproducible
+  ;; The contract a caller actually wants: how do I get the same index twice?
+  ;; It needs both halves - :seed fixes level assignment, :parallelism 1 removes
+  ;; the neighbour-selection race - and neither alone is enough.
+  (testing ":seed plus :parallelism 1 reproduces the graph"
+    (let [vecs (random-vectors 300 16)
+          topology (fn [parallelism]
+                     (let [idx (create-test-index {:type :hnsw :dim 16 :M 8
+                                                   :ef-construction 50 :capacity 1000
+                                                   :seed 42
+                                                   :store-config {:backend :memory
+                                                                  :id (java.util.UUID/randomUUID)}})
+                           built (core/insert-batch idx vecs (range 300) {:parallelism parallelism})
+                           ^PersistentEdgeIndex pes (p/edge-storage built)]
+                       (mapv #(vec (or (.getNeighbors pes 0 (int %)) [])) (range 300))))]
+      (is (= (topology 1) (topology 1) (topology 1))
+          "seeded and sequential must be reproducible"))))
+
 (deftest test-capacity-default-fits-the-mapping
   ;; The mmap is mapped through FileChannel.map, so the file must fit in an int.
   ;; A flat default of 10,000,000 exceeded that for any dim above 53 - i.e. for
