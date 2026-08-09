@@ -57,6 +57,12 @@
 (def ^:const OFFSET-COUNT 8)
 (def ^:const OFFSET-DIM 16)
 (def ^:const OFFSET-CHUNK-SIZE 24)
+;; Commit id of the branch state this file's contents correspond to, stamped by
+;; sync!. An all-zero id means "written before this field existed, or never
+;; synced" and is never trusted. Previously reserved bytes; files written by
+;; older versions read as all-zero, which is the conservative answer.
+(def ^:const OFFSET-COMMIT-MSB 32)
+(def ^:const OFFSET-COMMIT-LSB 40)
 
 ;; -----------------------------------------------------------------------------
 ;; Content-Based Hashing (for :crypto-hash? mode)
@@ -152,7 +158,10 @@
 ;; Mmap Header Operations
 
 (defn- write-header!
-  "Write full header to mmap buffer."
+  "Write full header to mmap buffer.
+
+   The commit id is zeroed: the file's contents do not correspond to any
+   committed state until sync! stamps one."
   [^MappedByteBuffer buf ^long count ^long dim ^long chunk-size]
   (locking buf
     (.position buf 0)
@@ -160,15 +169,35 @@
     (.putInt buf HEADER-VERSION)
     (.putLong buf count)
     (.putLong buf dim)
-    (.putLong buf chunk-size)))
+    (.putLong buf chunk-size)
+    (.putLong buf OFFSET-COMMIT-MSB 0)
+    (.putLong buf OFFSET-COMMIT-LSB 0)))
 
 (defn update-header-count!
   "Update only the count field in header (at fixed offset)."
   [^MappedByteBuffer buf ^long count]
   (.putLong buf OFFSET-COUNT count))
 
+(defn update-header-commit!
+  "Stamp the commit id this file's contents correspond to.
+
+   Call this only once the commit is durable: on the next open, a file whose
+   stamp matches the branch snapshot is trusted up to its header count, and a
+   file that does not match is reloaded from konserve. Passing nil clears the
+   stamp, which makes the file untrusted."
+  [^MappedByteBuffer buf commit-id]
+  (locking buf
+    (if commit-id
+      (do (.putLong buf OFFSET-COMMIT-MSB (.getMostSignificantBits ^java.util.UUID commit-id))
+          (.putLong buf OFFSET-COMMIT-LSB (.getLeastSignificantBits ^java.util.UUID commit-id)))
+      (do (.putLong buf OFFSET-COMMIT-MSB 0)
+          (.putLong buf OFFSET-COMMIT-LSB 0)))))
+
 (defn- read-header
-  "Read header from mmap buffer. Returns nil if invalid."
+  "Read header from mmap buffer. Returns nil if invalid.
+
+   :commit-id is nil for an all-zero stamp - a file written before the field
+   existed, or one that has never been synced."
   [^MappedByteBuffer buf]
   (locking buf
     (.position buf 0)
@@ -178,10 +207,17 @@
       (when (= magic-str "PVDB")
         (let [version (.getInt buf)]
           (when (= version HEADER-VERSION)
-            {:version version
-             :count (.getLong buf)
-             :dim (.getLong buf)
-             :chunk-size (.getLong buf)}))))))
+            (let [count (.getLong buf)
+                  dim (.getLong buf)
+                  chunk-size (.getLong buf)
+                  msb (.getLong buf OFFSET-COMMIT-MSB)
+                  lsb (.getLong buf OFFSET-COMMIT-LSB)]
+              {:version version
+               :count count
+               :dim dim
+               :chunk-size chunk-size
+               :commit-id (when-not (and (zero? msb) (zero? lsb))
+                            (java.util.UUID. msb lsb))})))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Mmap File Operations
@@ -228,12 +264,18 @@
             mem-seg (.map channel FileChannel$MapMode/READ_WRITE 0 file-size arena)]
         (.order mmap-buf ByteOrder/LITTLE_ENDIAN)
         (.close raf)
-        (when-let [header (read-header mmap-buf)]
+        (if-let [header (read-header mmap-buf)]
           {:mmap-buf mmap-buf
            :mem-segment mem-seg
            :arena arena
            :header header
-           :capacity (quot (- file-size HEADER-SIZE) (* (:dim header) 4))})))))
+           :capacity (quot (- file-size HEADER-SIZE) (* (:dim header) 4))}
+          ;; Bad magic or version: release the mapping before giving up. A
+          ;; shared Arena has no cleaner, so returning nil here used to retain
+          ;; the mapping for the life of the process - the same leak the caller
+          ;; fixes for the mapping it declines to adopt.
+          (do (.close arena)
+              nil))))))
 
 (defn- ensure-mmap-capacity
   "Ensure mmap has enough capacity, creating new file if needed."
@@ -293,8 +335,15 @@
 
 (defn open-store*
   "Internal: Open an existing vector store. All params required.
-   Called only from restore-index-from-snapshot and branch!."
-  [store dim chunk-size crypto-hash? mmap-path address-map vector-count commit-hash]
+   Called only from restore-index-from-snapshot and branch!.
+
+   `capacity` is the index's created capacity (:index/config's :max-nodes),
+   which is the authority on how large the index may grow - the same value
+   restore-index sizes the PersistentEdgeIndex from. Pass nil only when no
+   config is available, in which case sizing falls back to the vector count
+   plus a fixed headroom."
+  [store dim chunk-size crypto-hash? mmap-path address-map vector-count commit-hash
+   capacity snapshot-commit-id]
   (let [;; Try to open existing mmap if path provided
         existing-mmap (when mmap-path (open-existing-mmap mmap-path))
         ;; Check if existing mmap is compatible
@@ -304,19 +353,57 @@
         mmap-header-count (if mmap-compatible?
                             (get-in existing-mmap [:header :count])
                             0)
-        ;; Determine capacity needed
+        ;; Determine capacity needed. The created capacity governs, so a
+        ;; restored index has exactly the ceiling it was created with:
+        ;;   - sizing below it stranded appends at count + headroom, which on
+        ;;     hosts where the mmap cache does not survive a restart reset the
+        ;;     ceiling on every boot ("Index capacity exceeded" far below the
+        ;;     configured :capacity, with :utilization reported against that
+        ;;     phantom ceiling rather than the real one)
+        ;;   - sizing above it let appends past :max-nodes through the guard in
+        ;;     hnsw/insert and blow up inside PersistentEdgeIndex with a raw
+        ;;     ArrayIndexOutOfBoundsException instead of the intended error
+        ;; The mmap file is sparse, so sizing to the created capacity costs disk
+        ;; only as live vectors land - though the apparent size is the full
+        ;; capacity, which quotas and backup tools do see.
         extra-capacity 10000
-        required-capacity (+ vector-count extra-capacity)
+        _ (when (and capacity (> vector-count (long capacity)))
+            ;; Sizing up to fit would produce a store that loads and then breaks:
+            ;; the PersistentEdgeIndex is built at :max-nodes, so the first
+            ;; search past it throws ArrayIndexOutOfBoundsException. Refuse
+            ;; instead, in line with the config validation in restore-index.
+            (throw (ex-info "Stored vector count exceeds the index's created capacity"
+                            {:vector-count vector-count
+                             :capacity (long capacity)
+                             :hint "The snapshot and :index/config disagree; the store looks corrupt or hand-edited"})))
+        required-capacity (if capacity
+                            (long capacity)
+                            (+ vector-count extra-capacity))
         ;; Create or reuse mmap
         actual-mmap-path (or mmap-path
                              (str (System/getProperty "java.io.tmpdir")
-                                  "/vectors-" (System/currentTimeMillis) ".mmap"))
+                                  ;; UUID, not currentTimeMillis: two loads in
+                                  ;; the same millisecond would otherwise share
+                                  ;; one temp file and overwrite each other.
+                                  "/vectors-" (java.util.UUID/randomUUID) ".mmap"))
         reuse-existing? (and mmap-compatible?
                              (>= (:capacity existing-mmap) required-capacity))
-        {:keys [mmap-buf mem-segment arena capacity]}
+        ;; Release a mapping we opened but are not adopting: a shared Arena has
+        ;; no cleaner, so dropping it on the floor retains the mapping (and its
+        ;; address space) for the life of the process.
+        _ (when (and existing-mmap (not reuse-existing?))
+            (.close ^Arena (:arena existing-mmap)))
+        ;; Bind the FILE's capacity separately - it is not the index's ceiling.
+        ;; A file written before restores honoured the created capacity is
+        ;; routinely larger than :max-nodes, and adopting its size here is what
+        ;; let appends past :max-nodes through the guard in hnsw/insert.
+        {:keys [mmap-buf mem-segment arena] file-capacity :capacity}
         (if reuse-existing?
           existing-mmap
           (create-mmap-file actual-mmap-path dim chunk-size required-capacity))
+        ;; The created capacity governs whenever we know it, however big the
+        ;; file underneath happens to be.
+        store-capacity (if capacity required-capacity file-capacity)
         ;; Load chunks from konserve that the mmap does not already hold.
         ;; Gate on reuse-existing?, NOT mmap-compatible?: when the mapping is
         ;; rejected (too small) we recreate it, but create-mmap-file setLengths
@@ -324,7 +411,24 @@
         ;; there. Trusting the rejected file's header count then skips reloading
         ;; chunks the caller never validated - serving whatever happened to be
         ;; in that file. Only a mapping we actually adopted may be trusted.
-        start-chunk (if reuse-existing?
+        ;;
+        ;; ...and only when the file's contents belong to THIS branch state.
+        ;; Skipping a chunk means serving it from the file instead of konserve,
+        ;; which is sound exactly when the file is a prefix of this lineage.
+        ;; Nothing established that before: a file left by another store sharing
+        ;; the :mmap-dir, or by a lineage since rewound with reset!, was trusted
+        ;; on its header count alone and served another index's vectors.
+        ;; sync! stamps the commit id the contents correspond to, so requiring
+        ;; it to equal the branch snapshot's is a positive identity check rather
+        ;; than an inference. An unstamped file (written before this field, or
+        ;; never synced) is never trusted. A mismatch costs a reload from
+        ;; konserve, which is the source of truth - being wrong here is slow,
+        ;; not incorrect.
+        cache-belongs? (and reuse-existing?
+                            (some? snapshot-commit-id)
+                            (= snapshot-commit-id
+                               (get-in existing-mmap [:header :commit-id])))
+        start-chunk (if cache-belongs?
                       (chunk-id mmap-header-count chunk-size)
                       0)
         end-chunk (if (zero? vector-count)
@@ -336,6 +440,23 @@
         (let [data (k/get store (chunk-key addr) nil {:sync? true})]
           (when data
             (load-chunk-bytes-to-mmap! mmap-buf dim chunk-size cid data)))))
+    ;; Loading rewrote the file, so restamp it to describe what it now holds.
+    ;;
+    ;; The stamp has to track CONTENTS, not the last sync. Opening an older or
+    ;; diverged commit loads that commit's chunks into this branch's file while
+    ;; leaving the previous stamp in place - after which the branch head's next
+    ;; open would trust its own stamp and be served the other lineage's vectors.
+    ;; (Reproduced: reset! a branch, diverge, load-commit the abandoned commit,
+    ;; reopen the head - it served the abandoned lineage.) Stamping here keeps
+    ;; the invariant "the header describes the bytes", so time travel merely
+    ;; costs the head a reload on its next open instead of corrupting it.
+    ;;
+    ;; It also means a read-only consumer that never syncs still gets a usable
+    ;; cache from its second open onward.
+    (when (and snapshot-commit-id (not cache-belongs?))
+      (update-header-count! mmap-buf vector-count)
+      (update-header-commit! mmap-buf snapshot-commit-id)
+      (.force ^MappedByteBuffer mmap-buf))
     (->VectorStore
      store
      dim
@@ -348,7 +469,7 @@
      mmap-buf
      mem-segment
      arena
-     capacity
+     store-capacity
      crypto-hash?
      (when crypto-hash? (atom commit-hash))
      (when crypto-hash? (atom []))

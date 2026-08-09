@@ -142,6 +142,15 @@
     (k/assoc edge-store new-branch new-snapshot {:sync? true})                        ; mutable branch head
     (k/update edge-store :branches #(conj (or % #{}) new-branch) {:sync? true})
 
+    ;; The copied mmap still carries the source branch's stamp. Restamp it with
+    ;; the commit just written, so reopening this branch recognises its own
+    ;; cache instead of discarding it and reloading every chunk from konserve.
+    ;; Safe because branch! requires a synced source: the copy is exactly the
+    ;; state this commit describes.
+    (when-let [mmap-buf (:mmap-buf forked-vectors)]
+      (vectors/update-header-commit! mmap-buf new-commit-id)
+      (.force ^java.nio.MappedByteBuffer mmap-buf))
+
     ;; Assemble forked index using Forkable protocol
     (p/assemble-forked-index idx forked-vectors forked-graph new-branch new-commit-id)))
 
