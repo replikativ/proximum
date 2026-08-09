@@ -3,6 +3,7 @@
             [proximum.core :as core]
             [proximum.protocols :as p]
             [proximum.hnsw.internal :as hnsw.i] ;; Only for address-map (no protocol equivalent)
+            [proximum.versioning :as versioning]
             [clojure.set :as set]
             [clojure.core.async :as a])
   (:import [java.io File]
@@ -1009,6 +1010,119 @@
       (finally
         (cleanup storage-path)
         (cleanup (str storage-path "-mmap-fresh"))))))
+
+;; -----------------------------------------------------------------------------
+;; Mmap cache trust
+;;
+;; Sizing the restored mmap at the created capacity means the cached file is now
+;; always big enough to reuse, where a modest-capacity index used to be recreated
+;; on every open. That makes the reuse path load-bearing, and it is only sound
+;; when the file's contents belong to the branch being opened. sync! stamps the
+;; commit id the contents correspond to; these tests cover both answers.
+
+(defn- overwrite-vector-in-mmap!
+  "Write `value` into every dimension of vector `idx` directly in the mmap file.
+
+   Used to tell where a reload sourced its data: konserve is untouched, so the
+   value comes back only if the file was trusted."
+  [^String mmap-path ^long dim ^long idx value]
+  (let [raf (java.io.RandomAccessFile. (File. mmap-path) "rw")
+        buf (byte-array (* dim 4))
+        bb (doto (java.nio.ByteBuffer/wrap buf)
+             (.order java.nio.ByteOrder/LITTLE_ENDIAN))]
+    (dotimes [_ dim] (.putFloat bb (float value)))
+    (.seek raf (+ 64 (* idx dim 4)))
+    (.write raf buf)
+    (.close raf)))
+
+(deftest test-cached-mmap-is-reused-when-it-belongs
+  ;; The fast path this PR turns on. Without an assertion like this, every other
+  ;; cache test passes just as well with reuse disabled entirely.
+  (let [storage-path (temp-path)]
+    (try
+      (let [store-config (store-config-for storage-path *store-id*)
+            mmap-dir (mmap-dir-for storage-path)
+            idx (create-test-index {:type :hnsw :dim 32 :M 8 :ef-construction 50
+                                    :capacity 5000 :chunk-size 10
+                                    :store-config store-config :mmap-dir mmap-dir})
+            idx2 (core/insert-batch idx (random-vectors 50 32) (range 50))
+            idx3 (a/<!! (core/sync! idx2))
+            mmap-path (:mmap-path (p/vector-storage idx3))]
+        (a/<!! (core/close! idx3))
+        ;; Vector 0 sits below start-chunk, so a trusted open serves it from the
+        ;; file. konserve still holds the original.
+        (overwrite-vector-in-mmap! mmap-path 32 0 9.0)
+        (let [loaded (core/load store-config :mmap-dir mmap-dir)]
+          (is (= 9.0 (first (vec (core/get-vector loaded 0))))
+              "a cache stamped with this branch's commit is reused, not re-read")
+          (a/<!! (core/close! loaded))))
+      (finally (cleanup storage-path)))))
+
+(deftest test-foreign-cached-mmap-is-not-trusted
+  ;; Two stores sharing one :mmap-dir derive the same vectors-main.bin and
+  ;; overwrite each other. Counts alone cannot distinguish them - these two are
+  ;; deliberately the same size - so the commit stamp has to.
+  (let [storage-path (temp-path)]
+    (try
+      (let [mmap-dir (mmap-dir-for storage-path)
+            build (fn [store-id value]
+                    (let [sc {:backend :file
+                              :path (str storage-path "/store-" store-id)
+                              :id store-id}
+                          idx (create-test-index {:type :hnsw :dim 8 :M 8 :ef-construction 50
+                                                  :capacity 1000 :chunk-size 100
+                                                  :store-config sc :mmap-dir mmap-dir})
+                          filled (core/insert-batch
+                                  idx (vec (repeat 500 (float-array (repeat 8 (float value)))))
+                                  (range 500))]
+                      (a/<!! (core/close! (a/<!! (core/sync! filled))))
+                      sc))
+            sc-a (build (java.util.UUID/randomUUID) 1.0)
+            _ (build (java.util.UUID/randomUUID) 7.0)]
+        (let [loaded (core/load sc-a :mmap-dir mmap-dir)
+              wrong (remove #(= 1.0 (first (vec (core/get-vector loaded %)))) (range 500))]
+          (is (empty? wrong)
+              "a cache left by a different store must not be served")
+          (a/<!! (core/close! loaded))))
+      (finally (cleanup storage-path)))))
+
+(deftest test-time-travel-does-not-poison-branch-cache
+  ;; Loading an old commit reloads that commit's chunks into the branch's mmap.
+  ;; If the stamp still named the head, the head's next open would trust the
+  ;; file and serve the abandoned lineage - so the stamp has to describe the
+  ;; bytes, not merely the last sync.
+  (let [storage-path (temp-path)]
+    (try
+      (let [store-config (store-config-for storage-path *store-id*)
+            mmap-dir (mmap-dir-for storage-path)
+            cv (fn [x] (float-array (repeat 8 (float x))))
+            idx (create-test-index {:type :hnsw :dim 8 :M 8 :ef-construction 50
+                                    :capacity 1000 :chunk-size 100
+                                    :store-config store-config :mmap-dir mmap-dir})
+            idx (core/insert-batch idx (vec (repeat 100 (cv 1.0))) (range 100))
+            idx (a/<!! (core/sync! idx))
+            early-commit (p/current-commit idx)
+            ;; abandoned lineage: slots 100..299 are 5.0
+            idx (core/insert-batch idx (vec (repeat 200 (cv 5.0))) (range 100 300))
+            idx (a/<!! (core/sync! idx))
+            abandoned-commit (p/current-commit idx)]
+        (a/<!! (core/close! idx))
+        ;; rewind and diverge: the same slots become 9.0 on the head
+        (let [r (core/load store-config :mmap-dir mmap-dir)
+              r (versioning/reset! r early-commit)
+              r (core/insert-batch r (vec (repeat 200 (cv 9.0))) (range 100 300))
+              r (a/<!! (core/sync! r))]
+          (a/<!! (core/close! r)))
+        ;; visit the abandoned commit, which rewrites the branch's mmap
+        (let [old (core/load-commit store-config abandoned-commit :mmap-dir mmap-dir)]
+          (is (= 5.0 (first (vec (core/get-vector old 150))))
+              "time travel still serves the commit that was asked for")
+          (a/<!! (core/close! old)))
+        (let [head (core/load store-config :mmap-dir mmap-dir)]
+          (is (= 9.0 (first (vec (core/get-vector head 150))))
+              "the head must not be served the abandoned lineage's vectors")
+          (a/<!! (core/close! head))))
+      (finally (cleanup storage-path)))))
 
 (deftest test-metrics
   (let [path (temp-path)]

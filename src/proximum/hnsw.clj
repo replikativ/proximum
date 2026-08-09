@@ -1016,6 +1016,15 @@
                  ;; Write commit entry and branch head using helper
                                    (writing/write-commit! edge-store commit-id branch snapshot)
 
+                 ;; Stamp the mmap with the commit its contents now correspond
+                 ;; to, so the next open can tell this cache apart from one left
+                 ;; by another store or by a lineage since rewound. Only after
+                 ;; write-commit!: a stamp for a commit that never landed would
+                 ;; claim the file matches a branch state that does not exist.
+                                   (when-let [mmap-buf (:mmap-buf vs)]
+                                     (vectors/update-header-commit! mmap-buf commit-id)
+                                     (.force ^java.nio.MappedByteBuffer mmap-buf))
+
                  ;; Only now are these chunks durably referenced: the blobs land
                  ;; earlier, but the address map that points at them is part of
                  ;; the commit. Clearing before this point means a throw in
@@ -1152,7 +1161,13 @@
         (vectors/open-store* edge-store dim chunk-size crypto-hash?
                              dst-mmap-path vectors-addr-map
                              vector-count commit-hash
-                             max-nodes))))
+                             max-nodes
+                             ;; The copy carries the source branch's stamp, and
+                             ;; branch! requires a synced source, so it is a
+                             ;; faithful prefix of what we are forking from.
+                             ;; branch! restamps it with the new branch's commit
+                             ;; once that commit exists.
+                             (:commit-id state)))))
 
   (assemble-forked-index [idx forked-vectors forked-graph new-branch new-commit-id]
     (update-hnsw-index idx {:vectors forked-vectors
@@ -1277,8 +1292,15 @@
         ;; Every field below is required to rebuild the index. Without this
         ;; check a partial config surfaces as an NPE from deep inside the mmap
         ;; or edge-index construction, after those have already allocated.
+        ;; :distance and :crypto-hash? are in this list because they are the two
+        ;; that degrade SILENTLY when absent: distance-keyword->type falls
+        ;; through to euclidean, so a cosine index would restore returning wrong
+        ;; neighbours, and crypto-hash? becomes false, quietly disabling merkle
+        ;; verification on an audited index. Both have been written by
+        ;; create-index since the first release, so requiring them is safe.
         _ (when-let [missing (seq (remove #(some? (get config %))
-                                          [:dim :M :M0 :max-nodes :chunk-size]))]
+                                          [:dim :M :M0 :max-nodes :chunk-size
+                                           :distance :crypto-hash?]))]
             (throw (ex-info "Index config is missing or incomplete - cannot restore"
                             {:missing (vec missing)
                              :config config
@@ -1292,13 +1314,14 @@
                 branch
                 commit-id]} snapshot
 
-        ;; Determine mmap path
-        ;; Priority: explicit > mmap-dir+branch > temp fallback
+        ;; Determine mmap path. Priority: explicit > mmap-dir+branch > none, in
+        ;; which case open-store* generates a temp path AND owns it, so close!
+        ;; deletes it. Generating the temp path here instead made it look
+        ;; caller-supplied, so since the ownership change every mmap-dir-less
+        ;; load leaked its temp file - at :max-nodes size, no less.
         actual-mmap-path (or mmap-path
                              (when mmap-dir
-                               (vectors/branch-mmap-path mmap-dir branch))
-                             (str (System/getProperty "java.io.tmpdir")
-                                  "/pvdb-" (name branch) "-" (System/currentTimeMillis) ".mmap"))
+                               (vectors/branch-mmap-path mmap-dir branch)))
 
         ;; Create PSS storage
         pss-store (storage/create-storage edge-store {:cache-size cache-size
@@ -1314,7 +1337,10 @@
                                 actual-mmap-path vectors-addr-map
                                 (or branch-vector-count 0)
                                 (:vectors-commit-hash snapshot)
-                                max-nodes)
+                                max-nodes
+                                ;; The cache is trusted only if it was stamped
+                                ;; with exactly this commit.
+                                commit-id)
 
         ;; Create PES and switch to transient mode for initialization
         max-level-int (or max-level 16)
