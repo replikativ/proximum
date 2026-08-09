@@ -57,12 +57,24 @@
 (def ^:const OFFSET-COUNT 8)
 (def ^:const OFFSET-DIM 16)
 (def ^:const OFFSET-CHUNK-SIZE 24)
+
 ;; Commit id of the branch state this file's contents correspond to, stamped by
 ;; sync!. An all-zero id means "written before this field existed, or never
 ;; synced" and is never trusted. Previously reserved bytes; files written by
 ;; older versions read as all-zero, which is the conservative answer.
 (def ^:const OFFSET-COMMIT-MSB 32)
 (def ^:const OFFSET-COMMIT-LSB 40)
+
+(defn max-capacity-for-dim
+  "Largest capacity whose mmap file can still be mapped, for a given dim.
+
+   create-mmap-file maps the whole file through FileChannel.map, which returns a
+   MappedByteBuffer and therefore cannot exceed Integer/MAX_VALUE bytes. Since a
+   vector costs dim*4 bytes, that caps capacity at (2^31-1 - HEADER-SIZE)/(dim*4)
+   - about 699k at dim 768. Exceeding it fails inside the JDK with
+   \"Size exceeds Integer.MAX_VALUE\", which says nothing about dim or capacity."
+  ^long [^long dim]
+  (quot (- Integer/MAX_VALUE HEADER-SIZE) (* dim 4)))
 
 ;; -----------------------------------------------------------------------------
 ;; Content-Based Hashing (for :crypto-hash? mode)

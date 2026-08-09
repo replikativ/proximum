@@ -1242,7 +1242,6 @@
            seed store store-config mmap-dir mmap-path]
     :or {M 16
          distance :euclidean
-         capacity 10000000
          max-levels nil
          chunk-size 1000
          cache-size 10000
@@ -1258,7 +1257,23 @@
                     {:seed seed
                      :type (type seed)
                      :hint "The seed is mixed with node ids to derive HNSW levels"})))
-  (let [store-config (when store-config (normalize-store-config store-config))
+  ;; The mmap is mapped through FileChannel.map, so the whole file must fit in
+  ;; an int. The old default of 10,000,000 exceeds that for any dim above 53 -
+  ;; i.e. for every real embedding model - and failed at create time with the
+  ;; JDK's "Size exceeds Integer.MAX_VALUE", which names neither dim nor
+  ;; capacity. Default to whatever fits; refuse an explicit request that does
+  ;; not, and say what the limit is.
+  (let [dim-max-capacity (vectors/max-capacity-for-dim dim)
+        capacity (or capacity (min vectors/DEFAULT-CAPACITY dim-max-capacity))
+        _ (when (> capacity dim-max-capacity)
+            (throw (ex-info "Requested :capacity does not fit in a single memory mapping"
+                            {:capacity capacity
+                             :dim dim
+                             :max-capacity-for-dim dim-max-capacity
+                             :hint (str "A vector costs dim*4 bytes and the mapping is limited to "
+                                        "2GiB, so dim " dim " allows at most " dim-max-capacity
+                                        " vectors")})))
+        store-config (when store-config (normalize-store-config store-config))
         M0 (* 2 M)
         ml (/ 1.0 (Math/log M))
         ef-c (or ef-construction (recommended-ef-construction capacity M))
