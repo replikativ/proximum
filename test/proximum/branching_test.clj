@@ -392,6 +392,67 @@
         (finally
           (pv/close! idx))))))
 
+(deftest test-writing-on-a-historical-commit-is-refused
+  ;; Writing through an index restored from an older commit used to succeed and
+  ;; move the branch head BACKWARDS - the new snapshot carries the historical
+  ;; counts, so everything committed since is orphaned, silently, with every
+  ;; count looking plausible. Measured before the guard: a branch at 300 became
+  ;; 150. git requires you to be explicit here; so do we.
+  (testing "syncing an index that is not at the branch head is refused"
+    (let [idx (create-test-index {:type :hnsw :dim 32 :storage-path *test-path* :capacity 1000})]
+      (try
+        (let [idx (a/<!! (-> idx (insert-n 100 32) (pv/sync!)))
+              early (p/current-commit idx)
+              idx (a/<!! (-> idx (insert-n 200 32 #(+ 100 %)) (pv/sync!)))]
+          (is (= 300 (pv/count-vectors idx)))
+          (pv/close! idx)
+          (let [old (pv/load-commit (store-config-for *test-path* *store-id*) early
+                                    :mmap-dir (mmap-dir-for *test-path*))
+                dirty (insert-n old 50 32 #(+ 300 %))]
+            (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                                  #"not at the branch head"
+                                  (a/<!! (pv/sync! dirty)))
+                "the write must be refused rather than rewind the branch")
+            (pv/close! old))
+          ;; and the branch is untouched
+          (let [head (pv/load (store-config-for *test-path* *store-id*)
+                              :mmap-dir (mmap-dir-for *test-path*))]
+            (is (= 300 (pv/count-vectors head))
+                "the branch head must not have moved")
+            (pv/close! head)))
+        (finally nil)))))
+
+(deftest test-branch-from-historical-commit
+  ;; The workflow the refusal above points at: branch first, then write. This
+  ;; also covers two bugs in branch! itself - it compared a restored index's
+  ;; counts against the BRANCH HEAD's (refusing a perfectly clean index), and it
+  ;; based the new branch on the head's snapshot rather than on the commit the
+  ;; index was actually at.
+  (testing "branching from a restored historical commit works and is isolated"
+    (let [idx (create-test-index {:type :hnsw :dim 32 :storage-path *test-path* :capacity 1000})]
+      (try
+        (let [idx (a/<!! (-> idx (insert-n 100 32) (pv/sync!)))
+              early (p/current-commit idx)
+              idx (a/<!! (-> idx (insert-n 200 32 #(+ 100 %)) (pv/sync!)))]
+          (pv/close! idx)
+          (let [old (pv/load-commit (store-config-for *test-path* *store-id*) early
+                                    :mmap-dir (mmap-dir-for *test-path*))]
+            (is (= 100 (pv/count-vectors old)) "restored at the historical commit")
+            (let [exp (pv/branch! old :experiment)]
+              (is (= 100 (pv/count-vectors exp))
+                  "the new branch starts from the historical state, not the head")
+              (let [exp (a/<!! (-> exp (insert-n 50 32 #(+ 1000 %)) (pv/sync!)))]
+                (is (= 150 (pv/count-vectors exp))
+                    "and can be written to, since it is the head of its own branch")
+                (pv/close! exp)))
+            (pv/close! old))
+          (let [head (pv/load (store-config-for *test-path* *store-id*)
+                              :mmap-dir (mmap-dir-for *test-path*))]
+            (is (= 300 (pv/count-vectors head))
+                "the original branch is unaffected")
+            (pv/close! head)))
+        (finally nil)))))
+
 (deftest test-branch-duplicate-name-fails
   (testing "branch! with existing name fails"
     (let [idx (create-test-index {:type :hnsw
