@@ -1005,10 +1005,11 @@
                                    edges-commit-hash (when (and crypto-hash? (seq edges-chunk-hashes))
                                                        (edges/hash-commit nil edges-chunk-hashes))
 
-                 ;; Combined index commit hash (used as commit-id when crypto-hash? enabled)
-                                   final-vectors-hash (or vectors-commit-hash vectors-parent-hash)
-                                   new-commit-hash (when (and crypto-hash? (or final-vectors-hash edges-commit-hash))
-                                                     (crypto/hash-index-commit parent-commit-hash final-vectors-hash edges-commit-hash))]
+                 ;; Combined index commit hash is NOT computed here any more: it now
+                 ;; covers the commit snapshot, which does not exist yet. Only its
+                 ;; chunk-hash inputs are gathered here; the id is derived below,
+                 ;; once there is a snapshot to hash.
+                                   final-vectors-hash (or vectors-commit-hash vectors-parent-hash)]
 
              ;; Update vectors commit-hash atom and atomically remove processed hashes
                                (when crypto-hash?
@@ -1047,8 +1048,6 @@
                      ;; Flush all pending PSS writes
                                        _ (storage/flush-writes! store)
 
-                     ;; Generate commit ID using helper
-                                       commit-id (writing/generate-commit-id crypto-hash? new-commit-hash)
                                        now (java.util.Date.)
 
                      ;; Determine parents - use opts override or prev-snapshot
@@ -1056,14 +1055,30 @@
                                        parents (or (:parents opts)
                                                    (writing/determine-parents prev-commit))
 
-                     ;; Build the index snapshot with all PSS roots
-                     ;; Use index with updated address-map for snapshot building
+                     ;; SNAPSHOT FIRST, ID SECOND. The commit hash now covers the
+                     ;; snapshot, so the snapshot has to exist before the id can be
+                     ;; derived — it is built with a nil :commit-id (which the hash
+                     ;; excludes anyway, along with the timestamps) and the id is
+                     ;; assoc'd on afterwards.
+                     ;;
+                     ;; The chunk hashes are STORED on the snapshot, not merely fed
+                     ;; to the hash: verification has to recompute the id from cold
+                     ;; storage, and it cannot do that without its own inputs.
+                     ;; `:edges-commit-hash` was never stored at all, which is why
+                     ;; proximum.audit's recompute could not reproduce an id.
                                        index-for-snapshot (update-hnsw-index idx {:address-map new-address-map})
-                                       snapshot (cond-> (writing/build-index-snapshot index-for-snapshot commit-id parents
-                                                                                      metadata-pss-root external-id-pss-root
-                                                                                      vectors-addr-pss-root edges-addr-pss-root
-                                                                                      now)
-                                                  (:message opts) (assoc :message (:message opts)))]
+                                       base-snapshot (cond-> (writing/build-index-snapshot index-for-snapshot nil parents
+                                                                                           metadata-pss-root external-id-pss-root
+                                                                                           vectors-addr-pss-root edges-addr-pss-root
+                                                                                           now)
+                                                       (:message opts) (assoc :message (:message opts))
+                                                       crypto-hash? (assoc :vectors-commit-hash final-vectors-hash
+                                                                           :edges-commit-hash edges-commit-hash))
+                                       commit-id (if crypto-hash?
+                                                   (crypto/hash-index-commit parent-commit-hash final-vectors-hash
+                                                                             edges-commit-hash base-snapshot)
+                                                   (writing/generate-commit-id false nil))
+                                       snapshot (assoc base-snapshot :commit-id commit-id)]
 
                  ;; Write commit entry and branch head using helper
                                    (writing/write-commit! edge-store commit-id branch snapshot)

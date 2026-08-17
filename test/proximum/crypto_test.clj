@@ -10,6 +10,7 @@
             [clojure.core.async :as a]
             [proximum.core :as core]
             [proximum.crypto :as crypto]
+            [konserve.core :as k]
             [proximum.protocols :as p])
   (:import [java.io File]))
 
@@ -102,6 +103,102 @@
         (finally
           (cleanup-path! base1)
           (cleanup-path! base2))))))
+
+
+;; -----------------------------------------------------------------------------
+;; What the commit hash COVERS
+;;
+;; The test above asserts that identical inputs, built with the same :seed,
+;; produce the same hash. These assert the other half: that the hash is a
+;; function of the whole commit, so verification can recompute it and any
+;; altered field is detectable. Both are needed — seeding makes construction
+;; reproducible, and covering the snapshot makes the id mean something.
+
+(deftest test-commit-hash-recomputes-from-cold-storage
+  (testing "the id is a function of the stored commit, so verification can
+            recompute it — this is what makes tampering detectable"
+    (let [base (temp-base-path)
+          layout (storage-layout base)]
+      (try
+        (let [idx (core/create-index {:type :hnsw :dim 4 :capacity 100 :M 8
+                                      :crypto-hash? true
+                                      :store-config (file-store-config (:store-path layout))
+                                      :mmap-dir (:mmap-dir layout)})
+              filled (reduce (fn [i n]
+                               (core/insert i (float-array [n (inc n) (+ n 2) (+ n 3)])
+                                            (keyword (str "v" n))))
+                             idx (range 10))
+              synced (a/<!! (p/sync! filled))
+              store (p/raw-storage synced)
+              snapshot (k/get store :main nil {:sync? true})]
+          (is (= (:commit-id snapshot)
+                 (crypto/hash-index-commit (first (:parents snapshot))
+                                           (:vectors-commit-hash snapshot)
+                                           (:edges-commit-hash snapshot)
+                                           snapshot))
+              "a commit must hash to its own id")
+          (is (some? (:edges-commit-hash snapshot))
+              "the hash inputs must be STORED, or verification cannot recompute"))
+        (finally (cleanup-path! base))))))
+
+(deftest test-commit-hash-ignores-timestamps
+  (testing "excluding :created-at/:updated-at is what makes the id
+            content-addressed: the same state dedupes whatever clock wrote it"
+    (let [base (temp-base-path)
+          layout (storage-layout base)]
+      (try
+        (let [idx (core/create-index {:type :hnsw :dim 4 :capacity 100 :M 8
+                                      :crypto-hash? true
+                                      :store-config (file-store-config (:store-path layout))
+                                      :mmap-dir (:mmap-dir layout)})
+              synced (a/<!! (p/sync! (core/insert idx (float-array [1.0 2.0 3.0 4.0]) :a)))
+              store (p/raw-storage synced)
+              snapshot (k/get store :main nil {:sync? true})
+              rehash (fn [snap] (crypto/hash-index-commit (first (:parents snap))
+                                                          (:vectors-commit-hash snap)
+                                                          (:edges-commit-hash snap)
+                                                          snap))]
+          (is (= (rehash snapshot)
+                 (rehash (assoc snapshot :created-at (java.util.Date. 0)
+                                :updated-at (java.util.Date. 0))))
+              "timestamps must not enter the hash"))
+        (finally (cleanup-path! base))))))
+
+(deftest test-commit-hash-covers-the-snapshot
+  (testing "REGRESSION: the hash covered the chunk hashes only, so every field
+            of the commit — the entrypoint, the max level, the counts, the PSS
+            roots naming the metadata and address trees — could be rewritten in
+            the store and `verify-from-cold` still returned {:valid? true}.
+            Measured at the time: five of five such tampers undetected."
+    (let [base (temp-base-path)
+          layout (storage-layout base)]
+      (try
+        (let [cfg (file-store-config (:store-path layout))
+              idx (core/create-index {:type :hnsw :dim 4 :capacity 100 :M 8
+                                      :crypto-hash? true
+                                      :store-config cfg
+                                      :mmap-dir (:mmap-dir layout)})
+              filled (reduce (fn [i n]
+                               (core/insert i (float-array [n (inc n) (+ n 2) (+ n 3)])
+                                            (keyword (str "v" n))))
+                             idx (range 10))
+              synced (a/<!! (p/sync! filled))
+              store (p/raw-storage synced)]
+          (is (:valid? (crypto/verify-from-cold cfg :main {:store store}))
+              "the untampered index must verify")
+          (doseq [[field value] {:entrypoint 999999
+                                 :current-max-level 42
+                                 :vector-count 99999
+                                 :metadata-pss-root (java.util.UUID/randomUUID)
+                                 :external-id-pss-root (java.util.UUID/randomUUID)}]
+            (let [snapshot (k/get store :main nil {:sync? true})]
+              (try
+                (k/assoc store :main (assoc snapshot field value) {:sync? true})
+                (is (not (:valid? (crypto/verify-from-cold cfg :main {:store store})))
+                    (str "tampering with " field " must be detected"))
+                (finally
+                  (k/assoc store :main snapshot {:sync? true}))))))
+        (finally (cleanup-path! base))))))
 
 (deftest test-hash-determinism-different-data
   (testing "Different data produces different commit hash"
