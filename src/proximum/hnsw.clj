@@ -24,6 +24,8 @@
             [proximum.logging :as log]
             [org.replikativ.persistent-sorted-set :as pss]
             [konserve.core :as k]
+            [konserve.gc-guard :as guard]
+            [konserve.protocols :as kp]
             [clojure.core.async :as a])
   (:import [proximum.internal PersistentEdgeIndex HnswInsert HnswSearch ArrayBitSet]
            [java.lang.foreign MemorySegment]))
@@ -1018,6 +1020,16 @@
 
              ;; 7. Store all PSS structures and create commit
                                (if-let [store (:storage state)]
+                                 ;; GUARDED, because everything from here to
+                                 ;; `write-commit!` is one values-then-pointer
+                                 ;; sequence: the PSS nodes and chunk addresses go
+                                 ;; in first, and only the branch-head write at the
+                                 ;; end makes them reachable. A collection landing
+                                 ;; inside that window would classify them as
+                                 ;; garbage — they are already older than its start
+                                 ;; instant — and sweep them out from under the
+                                 ;; commit about to name them. See konserve.gc-guard.
+                                 (guard/with-unreferenced-writes (kp/store-id edge-store)
                                  (let [;; Store metadata PSS
                                        meta-pss (:metadata state)
                                        metadata-pss-root (pss/store meta-pss store)

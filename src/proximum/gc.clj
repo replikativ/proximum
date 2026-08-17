@@ -17,6 +17,9 @@
    - Unreachable PSS nodes"
   (:require [konserve.core :as k]
             [konserve.gc :as k-gc]
+            [konserve.gc-guard :as guard]
+            [konserve.protocols :as kp]
+            [konserve.utils :as ku]
             [org.replikativ.persistent-sorted-set :as pss]
             [clojure.set :as set]
             [proximum.protocols :as p]
@@ -183,6 +186,22 @@
                          snapshot-keys (mark-snapshot snapshot storage)
                          new-wl (-> wl
                                     (conj ref)  ; The commit/branch key itself
+                                     ;; ...AND the commit it names. A branch head is
+                                     ;; stored TWICE — once mutably under `:main`, once
+                                     ;; content-addressed under its commit-id — and
+                                     ;; only `:main` is `ref` here. Without this the
+                                     ;; head commit of every branch was collected on
+                                     ;; each GC, leaving `history` and `parents` to
+                                     ;; dangle the moment they walked back into it.
+                                     ;; Ancestors escaped only because they are
+                                     ;; reached as `parent-commits` and become `ref`
+                                     ;; in their own turn.
+                                     ;;
+                                     ;; Invisible until now: the sweep cutoff used to
+                                     ;; be `remove-before`, epoch by default, so
+                                     ;; nothing was ever deleted and the mark was
+                                     ;; never actually tested.
+                                    (conj (:commit-id snapshot))
                                     (into snapshot-keys))]
                      (recur (concat (rest to-check) parent-commits)
                             (conj visited ref)
@@ -197,22 +216,38 @@
 ;; GC Entry Point
 
 (defn gc!
-  "Garbage collect unreachable data from storage.
+  "Garbage collect unreachable data from storage. Returns the set of deleted keys.
 
-   Performs mark-and-sweep GC:
-   1. Mark: Traverse from all branch heads, collect reachable keys
-   2. Sweep: Delete all non-whitelisted keys older than remove-before
+   Mark from every branch head, then sweep whatever the mark did not reach.
+
+   TWO DATES, NOT ONE, and they want opposite values — conflating them was the
+   bug here:
+
+     `remove-before` is a RETENTION POLICY. It bounds the mark: history older
+     than it stops being reachable and so becomes collectable. Callers want it
+     in the past (\"keep thirty days\").
+
+     the sweep CUTOFF is a SAFETY FLOOR. Nothing younger may be collected,
+     because it may be a values-then-pointer sequence in flight. It wants to be
+     NOW, pulled back only by `konserve.gc-guard`.
+
+   Using `remove-before` for both meant recent garbage could never be reclaimed
+   — it was always younger than the cutoff — and that pushing the date forward
+   to reclaim it simultaneously dropped recent history from the mark, deleting
+   live data. datahike separates them for the same reason (`datahike.gc`).
+
+   THE GUARD IS READ BEFORE THE MARK. `konserve.gc/sweep!` cannot do this for
+   us: it receives a finished whitelist, so any reading it did would come after
+   the mark, and a sequence landing its pointer in between would be invisible to
+   both. See `konserve.gc/sweep!`.
 
    Args:
      idx           - HnswIndex with storage
-     remove-before - Date cutoff for old commits (default: epoch = remove nothing by time)
+     remove-before - Date before which history stops being reachable
+                     (default: epoch, i.e. keep all history)
 
    Options:
-     :batch-size - Deletion batch size (default 1000)
-
-   Returns:
-     Channel that delivers set of deleted keys when GC completes.
-     Use <! in go-block or <!! to block."
+     :batch-size - Deletion batch size (default 1000)"
   ([idx] (gc! idx (java.util.Date. 0)))
   ([idx remove-before] (gc! idx remove-before {}))
   ([idx remove-before {:keys [batch-size] :or {batch-size 1000}}]
@@ -222,11 +257,13 @@
 
    (let [edge-store (p/raw-storage idx)
          storage (p/storage idx)
-         ;; Get all branches
+         store-id (kp/store-id edge-store)
+         ;; Guard first, mark second — see above.
+         cutoff (if store-id
+                  (guard/cutoff store-id (ku/now))
+                  (ku/now))
          branches (or (k/get edge-store :branches nil {:sync? true}) #{})
-         ;; Mark reachable keys
          whitelist (mark-reachable edge-store storage branches remove-before)]
-     ;; Return channel directly - no blocking
-     (k-gc/sweep! edge-store whitelist remove-before batch-size))))
+     (k-gc/sweep! edge-store whitelist cutoff batch-size {:sync? true}))))
 
 ;; Note: history function moved to proximum.versioning

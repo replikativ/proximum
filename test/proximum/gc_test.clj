@@ -79,7 +79,7 @@
               idx-synced (a/<!! (p/sync! idx-with-data))]
 
           ;; Run GC with epoch (remove nothing by time)
-          (let [deleted (a/<!! (gc/gc! idx-synced (Date. 0)))]
+          (let [deleted (gc/gc! idx-synced (Date. 0))]
             ;; Should delete nothing (all data is reachable from :main)
             (is (empty? deleted) "No garbage to collect with active index")))
 
@@ -95,7 +95,7 @@
                                                  :id (java.util.UUID/randomUUID)}})
           idx-with-data (core/insert idx (float-array [1.0 2.0 3.0 4.0]) :a)
           idx-synced (a/<!! (p/sync! idx-with-data))
-          deleted (a/<!! (gc/gc! idx-synced))]
+          deleted (gc/gc! idx-synced)]
 
       ;; Memory backend can be GC'd too
       (is (coll? deleted) "Returns collection of deleted keys"))))
@@ -133,7 +133,7 @@
                     commit2-id (p/current-commit idx2-synced)]
 
                 ;; GC with cutoff after commit1 but before commit2
-                (let [deleted (a/<!! (gc/gc! idx2-synced cutoff))]
+                (let [deleted (gc/gc! idx2-synced cutoff)]
 
                   (is (some? commit1-id))
                   (is (some? commit2-id))
@@ -178,7 +178,7 @@
               (is (contains? branches :feature) "Feature branch exists")
 
               ;; Run GC
-              (let [deleted (a/<!! (gc/gc! idx-feature-synced))]
+              (let [deleted (gc/gc! idx-feature-synced)]
                 ;; Should preserve both branches
                 (is (empty? deleted) "All data reachable from either branch")))))
 
@@ -222,7 +222,7 @@
 
             ;; Run GC with far future cutoff to collect temp branch commits
             (let [far-future (Date. (+ (System/currentTimeMillis) 999999999))
-                  deleted (a/<!! (gc/gc! idx1-synced far-future))]
+                  deleted (gc/gc! idx1-synced far-future)]
               ;; Should collect orphaned temp-branch data
               ;; (temp branch commits are now unreachable and before cutoff)
               (is (pos? (count deleted)) "Orphaned data collected"))))
@@ -244,7 +244,7 @@
                                       :store-config (file-store-config (:store-path layout))
                                       :mmap-dir (:mmap-dir layout)})
               idx-synced (a/<!! (p/sync! idx))
-              deleted (a/<!! (gc/gc! idx-synced))]
+              deleted (gc/gc! idx-synced)]
 
           ;; Empty index has minimal data, nothing to collect
           (is (empty? deleted) "No data to collect from empty index"))
@@ -270,7 +270,7 @@
 
           ;; Run GC with far future cutoff (would remove everything by time)
           (let [far-future (Date. (+ (System/currentTimeMillis) 999999999))
-                deleted (a/<!! (gc/gc! idx-synced far-future))]
+                deleted (gc/gc! idx-synced far-future)]
 
             ;; Verify global keys still exist
             (is (some? (k/get store :branches nil {:sync? true})) ":branches preserved")
@@ -306,7 +306,7 @@
               idx-synced (a/<!! (p/sync! idx-with-data))]
 
           ;; Run GC with small batch size (should still work correctly)
-          (let [deleted (a/<!! (gc/gc! idx-synced (Date. 0) {:batch-size 10}))]
+          (let [deleted (gc/gc! idx-synced (Date. 0) {:batch-size 10})]
             ;; Should work same as default batch size
             (is (empty? deleted) "No garbage with small batch size")))
 

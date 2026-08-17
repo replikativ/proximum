@@ -573,13 +573,15 @@ public class ProximumVectorStore implements AutoCloseable {
 
     /**
      * Garbage collect unreachable data from storage.
-     * Returns channel that delivers set of deleted keys when GC completes.
-     * Removes commits older than remove-before date.
+     * Returns the set of deleted keys. Synchronous: konserve's sweep now honours
+     * :sync?, so neither this nor the generated bindings have to expose a channel.
+     * `remove-before` bounds HISTORY RETENTION — how far back commits stay
+     * reachable. It is not the sweep's safety cutoff, which is derived from
+     * konserve.gc-guard so a commit in flight is never collected.
      */
-    public CompletableFuture<Set<Object>> gc() {
+    public Set<Object> gc() {
         ensureInitialized();
-        Object channel = gcFn.invoke(clojureIndex);
-        return channelToCompletableFuture(channel, result -> (Set<Object>) result);
+        return (Set<Object>) gcFn.invoke(clojureIndex);
     }
 
     /**
@@ -966,13 +968,15 @@ public class ProximumVectorStore implements AutoCloseable {
 
     /**
      * Garbage collect unreachable data from storage.
-     * Returns channel that delivers set of deleted keys when GC completes.
-     * Removes commits older than remove-before date.
+     * Returns the set of deleted keys. Synchronous: konserve's sweep now honours
+     * :sync?, so neither this nor the generated bindings have to expose a channel.
+     * `remove-before` bounds HISTORY RETENTION — how far back commits stay
+     * reachable. It is not the sweep's safety cutoff, which is derived from
+     * konserve.gc-guard so a commit in flight is never collected.
      */
-    public CompletableFuture<Set<Object>> gc(Object arg0, Map<String, Object> opts) {
+    public Set<Object> gc(Object arg0, Map<String, Object> opts) {
         ensureInitialized();
-        Object channel = gcFn.invoke(clojureIndex, convertFilterArg(arg0), toClojureMap(opts));
-        return channelToCompletableFuture(channel, result -> (Set<Object>) result);
+        return (Set<Object>) gcFn.invoke(clojureIndex, convertFilterArg(arg0), toClojureMap(opts));
     }
 
     /**

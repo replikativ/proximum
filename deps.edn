@@ -18,7 +18,13 @@
         org.slf4j/slf4j-simple {:mvn/version "2.0.16"}}
 
  :aliases
- {:dev {:extra-paths ["dev" "test" "benchmark"]
+ ;; Sibling checkout, for the konserve gc-guard vertical. proximum needs
+ ;; `konserve.gc-guard` and `sweep!`'s `{:sync? true}` support, neither of
+ ;; which is released yet — use this until a konserve carrying them is on
+ ;; Maven. Every repo in the vertical must point at the SAME checkout.
+ {:local {:override-deps {org.replikativ/konserve {:local/root "../konserve"}}}
+
+  :dev {:extra-paths ["dev" "test" "benchmark"]
         :extra-deps {criterium/criterium {:mvn/version "0.4.6"}
                      nrepl/nrepl {:mvn/version "1.3.0"}
                      cider/cider-nrepl {:mvn/version "0.50.2"}
