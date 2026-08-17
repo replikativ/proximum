@@ -206,18 +206,19 @@ class JavaApiBindingTest {
                 store.delete(firstId);
                 store.sync().get();
 
-                // gc() returns CompletableFuture<Set<Object>>
-                // Just verify it's callable - actual gc behavior tested in Clojure tests
-                try {
-                    Object result = store.gc().get();  // Wait for async completion
-                    // If it returns, should be a Set (possibly empty)
-                    if (result != null) {
-                        assertInstanceOf(Set.class, result, "gc() result should be a Set");
-                    }
-                } catch (Exception e) {
-                    // gc may throw if async operation fails - that's acceptable for binding test
-                    // The method was callable, which is what we're testing
-                }
+                // gc() is SYNCHRONOUS: it returns the set of deleted keys directly.
+                // konserve's sweep honours :sync?, so neither the Clojure API nor
+                // this binding needs a CompletableFuture. Blocking is the better
+                // Java shape here — a caller who wants it async can park it on a
+                // virtual thread (CompletableFuture.supplyAsync(store::gc, exec)),
+                // whereas a future-returning method cannot be made cheaply
+                // blocking without .get() and ExecutionException wrapping.
+                //
+                // Asserted rather than caught: the previous version swallowed every
+                // exception on the grounds that an async failure was acceptable for
+                // a binding test, which would equally have hidden a real one.
+                Set<Object> deleted = store.gc();
+                assertNotNull(deleted, "gc() should return a set, never null");
             }
         }
 

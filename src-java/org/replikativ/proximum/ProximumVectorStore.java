@@ -315,17 +315,25 @@ public class ProximumVectorStore implements AutoCloseable {
 
         /**
          * Convenience method to set storage path with default file backend.
+         *
+         * <p>The konserve store and the mmap'd vector files go in SEPARATE
+         * subdirectories, {@code path/store} and {@code path/mmap}. They used to
+         * share one directory, which put proximum's mmap files among konserve's
+         * blobs — and konserve treats a file it does not recognise in its store
+         * directory as an old-schema blob to migrate, so every key enumeration
+         * tried to migrate the vector file.
+         *
          * @param path directory path for storage
          * @return this builder
          */
         public Builder storagePath(String path) {
             this.storeConfig = Map.of(
                 "backend", ":file",
-                "path", path,
+                "path", path + "/store",
                 "id", UUID.randomUUID()
             );
             if (this.mmapDir == null) {
-                this.mmapDir = path;
+                this.mmapDir = path + "/mmap";
             }
             return this;
         }
@@ -573,8 +581,11 @@ public class ProximumVectorStore implements AutoCloseable {
 
     /**
      * Garbage collect unreachable data from storage.
-     * Returns the set of deleted keys. Synchronous: konserve's sweep now honours
-     * :sync?, so neither this nor the generated bindings have to expose a channel.
+     * Returns the set of deleted keys. Synchronous: konserve's sweep honours :sync?,
+     * so neither this nor the generated bindings have to expose a channel. In Java,
+     * park it on a virtual thread if you want it off the calling thread — blocking
+     * composes into async, and a future-returning method does not compose back into
+     * blocking without .get() and ExecutionException wrapping.
      * `remove-before` bounds HISTORY RETENTION — how far back commits stay
      * reachable. It is not the sweep's safety cutoff, which is derived from
      * konserve.gc-guard so a commit in flight is never collected.
@@ -968,8 +979,11 @@ public class ProximumVectorStore implements AutoCloseable {
 
     /**
      * Garbage collect unreachable data from storage.
-     * Returns the set of deleted keys. Synchronous: konserve's sweep now honours
-     * :sync?, so neither this nor the generated bindings have to expose a channel.
+     * Returns the set of deleted keys. Synchronous: konserve's sweep honours :sync?,
+     * so neither this nor the generated bindings have to expose a channel. In Java,
+     * park it on a virtual thread if you want it off the calling thread — blocking
+     * composes into async, and a future-returning method does not compose back into
+     * blocking without .get() and ExecutionException wrapping.
      * `remove-before` bounds HISTORY RETENTION — how far back commits stay
      * reachable. It is not the sweep's safety cutoff, which is derived from
      * konserve.gc-guard so a commit in flight is never collected.
