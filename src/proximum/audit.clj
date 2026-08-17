@@ -146,8 +146,9 @@
                    (if-let [snap (k/get store cid nil {:sync? true})]
                      (let [recomputed (pcrypto/hash-index-commit
                                        (first (:parents snap))
-                                       (or (:vectors-commit-hash snap) nil)
-                                       (or (:edges-commit-hash snap) nil))
+                                       (:vectors-commit-hash snap)
+                                       (:edges-commit-hash snap)
+                                       snap)
                            ok? (= cid recomputed)]
                        (vswap! commits conj
                                (cond-> {:cid cid

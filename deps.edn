@@ -3,7 +3,7 @@
  ;; For Maven Central deployment, use published dependencies:
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
         org.replikativ/persistent-sorted-set {:mvn/version "0.4.126"}
-        org.replikativ/konserve {:mvn/version "0.9.350"}
+        org.replikativ/konserve {:mvn/version "0.9.375"}
         org.replikativ/hasch {:mvn/version "0.3.96"}
         com.clojure-goes-fast/clj-memory-meter {:mvn/version "0.3.0"}
         org.clojure/core.cache {:mvn/version "1.1.234"}
@@ -18,7 +18,10 @@
         org.slf4j/slf4j-simple {:mvn/version "2.0.16"}}
 
  :aliases
- {:dev {:extra-paths ["dev" "test" "benchmark"]
+ ;; Sibling checkout, for co-development across the replikativ stack.
+ {:local {:override-deps {org.replikativ/konserve {:local/root "../konserve"}}}
+
+  :dev {:extra-paths ["dev" "test" "benchmark"]
         :extra-deps {criterium/criterium {:mvn/version "0.4.6"}
                      nrepl/nrepl {:mvn/version "1.3.0"}
                      cider/cider-nrepl {:mvn/version "0.50.2"}

@@ -24,6 +24,8 @@
             [proximum.logging :as log]
             [org.replikativ.persistent-sorted-set :as pss]
             [konserve.core :as k]
+            [konserve.gc-guard :as guard]
+            [konserve.protocols :as kp]
             [clojure.core.async :as a])
   (:import [proximum.internal PersistentEdgeIndex HnswInsert HnswSearch ArrayBitSet]
            [java.lang.foreign MemorySegment]))
@@ -1003,10 +1005,11 @@
                                    edges-commit-hash (when (and crypto-hash? (seq edges-chunk-hashes))
                                                        (edges/hash-commit nil edges-chunk-hashes))
 
-                 ;; Combined index commit hash (used as commit-id when crypto-hash? enabled)
-                                   final-vectors-hash (or vectors-commit-hash vectors-parent-hash)
-                                   new-commit-hash (when (and crypto-hash? (or final-vectors-hash edges-commit-hash))
-                                                     (crypto/hash-index-commit parent-commit-hash final-vectors-hash edges-commit-hash))]
+                 ;; Combined index commit hash is NOT computed here any more: it now
+                 ;; covers the commit snapshot, which does not exist yet. Only its
+                 ;; chunk-hash inputs are gathered here; the id is derived below,
+                 ;; once there is a snapshot to hash.
+                                   final-vectors-hash (or vectors-commit-hash vectors-parent-hash)]
 
              ;; Update vectors commit-hash atom and atomically remove processed hashes
                                (when crypto-hash?
@@ -1018,52 +1021,76 @@
 
              ;; 7. Store all PSS structures and create commit
                                (if-let [store (:storage state)]
-                                 (let [;; Store metadata PSS
-                                       meta-pss (:metadata state)
-                                       metadata-pss-root (pss/store meta-pss store)
-                                       external-id-pss-root (pss/store (:external-id-index state) store)
+                                 ;; GUARDED, because everything from here to
+                                 ;; `write-commit!` is one values-then-pointer
+                                 ;; sequence: the PSS nodes and chunk addresses go
+                                 ;; in first, and only the branch-head write at the
+                                 ;; end makes them reachable. A collection landing
+                                 ;; inside that window would classify them as
+                                 ;; garbage — they are already older than its start
+                                 ;; instant — and sweep them out from under the
+                                 ;; commit about to name them. See konserve.gc-guard.
+                                 (guard/with-unreferenced-writes (kp/store-id edge-store)
+                                   (let [;; Store metadata PSS
+                                         meta-pss (:metadata state)
+                                         metadata-pss-root (pss/store meta-pss store)
+                                         external-id-pss-root (pss/store (:external-id-index state) store)
 
                      ;; Convert vectors address map to PSS and store
-                                       vectors-addr-map @(:chunk-address-map vs)
-                                       vectors-addr-pss (storage/map-to-address-pss vectors-addr-map store)
-                                       vectors-addr-pss-root (storage/store-address-pss! vectors-addr-pss store)
+                                         vectors-addr-map @(:chunk-address-map vs)
+                                         vectors-addr-pss (storage/map-to-address-pss vectors-addr-map store)
+                                         vectors-addr-pss-root (storage/store-address-pss! vectors-addr-pss store)
 
                      ;; Convert edges address map to PSS and store
-                                       edges-addr-pss (storage/map-to-address-pss new-address-map store)
-                                       edges-addr-pss-root (storage/store-address-pss! edges-addr-pss store)
+                                         edges-addr-pss (storage/map-to-address-pss new-address-map store)
+                                         edges-addr-pss-root (storage/store-address-pss! edges-addr-pss store)
 
                      ;; Flush all pending PSS writes
-                                       _ (storage/flush-writes! store)
+                                         _ (storage/flush-writes! store)
 
-                     ;; Generate commit ID using helper
-                                       commit-id (writing/generate-commit-id crypto-hash? new-commit-hash)
-                                       now (java.util.Date.)
+                                         now (java.util.Date.)
 
                      ;; Determine parents - use opts override or prev-snapshot
-                                       prev-commit (:commit-id prev-snapshot)
-                                       parents (or (:parents opts)
-                                                   (writing/determine-parents prev-commit))
+                                         prev-commit (:commit-id prev-snapshot)
+                                         parents (or (:parents opts)
+                                                     (writing/determine-parents prev-commit))
 
-                     ;; Build the index snapshot with all PSS roots
-                     ;; Use index with updated address-map for snapshot building
-                                       index-for-snapshot (update-hnsw-index idx {:address-map new-address-map})
-                                       snapshot (cond-> (writing/build-index-snapshot index-for-snapshot commit-id parents
-                                                                                      metadata-pss-root external-id-pss-root
-                                                                                      vectors-addr-pss-root edges-addr-pss-root
-                                                                                      now)
-                                                  (:message opts) (assoc :message (:message opts)))]
+                     ;; SNAPSHOT FIRST, ID SECOND. The commit hash now covers the
+                     ;; snapshot, so the snapshot has to exist before the id can be
+                     ;; derived — it is built with a nil :commit-id (which the hash
+                     ;; excludes anyway, along with the timestamps) and the id is
+                     ;; assoc'd on afterwards.
+                     ;;
+                     ;; The chunk hashes are STORED on the snapshot, not merely fed
+                     ;; to the hash: verification has to recompute the id from cold
+                     ;; storage, and it cannot do that without its own inputs.
+                     ;; `:edges-commit-hash` was never stored at all, which is why
+                     ;; proximum.audit's recompute could not reproduce an id.
+                                         index-for-snapshot (update-hnsw-index idx {:address-map new-address-map})
+                                         base-snapshot (cond-> (writing/build-index-snapshot index-for-snapshot nil parents
+                                                                                             metadata-pss-root external-id-pss-root
+                                                                                             vectors-addr-pss-root edges-addr-pss-root
+                                                                                             now)
+                                                         (:message opts) (assoc :message (:message opts))
+                                                         crypto-hash? (assoc :vectors-commit-hash final-vectors-hash
+                                                                             :edges-commit-hash edges-commit-hash))
+                                         commit-id (if crypto-hash?
+                                                     (crypto/hash-index-commit parent-commit-hash final-vectors-hash
+                                                                               edges-commit-hash base-snapshot)
+                                                     (writing/generate-commit-id false nil))
+                                         snapshot (assoc base-snapshot :commit-id commit-id)]
 
                  ;; Write commit entry and branch head using helper
-                                   (writing/write-commit! edge-store commit-id branch snapshot)
+                                     (writing/write-commit! edge-store commit-id branch snapshot)
 
                  ;; Stamp the mmap with the commit its contents now correspond
                  ;; to, so the next open can tell this cache apart from one left
                  ;; by another store or by a lineage since rewound. Only after
                  ;; write-commit!: a stamp for a commit that never landed would
                  ;; claim the file matches a branch state that does not exist.
-                                   (when-let [mmap-buf (:mmap-buf vs)]
-                                     (vectors/update-header-commit! mmap-buf commit-id)
-                                     (.force ^java.nio.MappedByteBuffer mmap-buf))
+                                     (when-let [mmap-buf (:mmap-buf vs)]
+                                       (vectors/update-header-commit! mmap-buf commit-id)
+                                       (.force ^java.nio.MappedByteBuffer mmap-buf))
 
                  ;; Only now are these chunks durably referenced: the blobs land
                  ;; earlier, but the address map that points at them is part of
@@ -1079,23 +1106,23 @@
                  ;; learns their addresses. Continuing to insert from the older
                  ;; value would then drop them again, which is issue #7 one
                  ;; level up. Forking keeps each lineage's bookkeeping its own.
-                                   (let [^PersistentEdgeIndex synced-pes
-                                         (if edge-store
-                                           (let [^PersistentEdgeIndex forked (.fork ^PersistentEdgeIndex pes)]
-                                             (.clearDirty forked
-                                                          ^java.util.Collection
-                                                          (:flushed-positions edges-async-result))
-                                             forked)
-                                           pes)]
-                                     (update-hnsw-index idx {:pes-edges synced-pes
-                                                             :address-map new-address-map
-                                                             :commit-id commit-id
+                                     (let [^PersistentEdgeIndex synced-pes
+                                           (if edge-store
+                                             (let [^PersistentEdgeIndex forked (.fork ^PersistentEdgeIndex pes)]
+                                               (.clearDirty forked
+                                                            ^java.util.Collection
+                                                            (:flushed-positions edges-async-result))
+                                               forked)
+                                             pes)]
+                                       (update-hnsw-index idx {:pes-edges synced-pes
+                                                               :address-map new-address-map
+                                                               :commit-id commit-id
                                                              ;; This index now IS the branch
                                                              ;; head, so further syncs are
                                                              ;; fast-forwards.
-                                                             :restored-from-commit commit-id
+                                                               :restored-from-commit commit-id
                                                              ;; The metadata PSS was just stored
-                                                             :unsynced-metadata? false})))
+                                                               :unsynced-metadata? false}))))
 
                ;; No storage - just return index with updated address-map
                                  (update-hnsw-index idx {:address-map new-address-map})))

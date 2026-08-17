@@ -240,6 +240,12 @@
    Uses Arena.ofShared() for proper resource lifecycle - arena must be closed explicitly."
   [^String path ^long dim ^long chunk-size ^long capacity]
   (let [file (File. path)
+        ;; Create the containing directory. RandomAccessFile "rw" creates the
+        ;; FILE but not its parents, so this used to work only because
+        ;; :mmap-dir happened to be a directory something else had made — the
+        ;; Java builder pointed it at the konserve store path, which konserve
+        ;; created on connect. Callers should not have to pre-create it.
+        _ (when-let [parent (.getParentFile file)] (.mkdirs parent))
         file-size (+ HEADER-SIZE (* capacity dim 4))
         raf (RandomAccessFile. file "rw")
         _ (.setLength raf file-size)

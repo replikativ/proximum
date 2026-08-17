@@ -494,7 +494,7 @@
               query (random-vector 32)]
 
           ;; Run GC with very old cutoff (shouldn't delete anything active)
-          (a/<!! (pv/gc! idx (java.util.Date. 0)))
+          (pv/gc! idx (java.util.Date. 0))
 
           ;; All vectors should still be searchable
           (is (= count-before (pv/count-vectors idx)))
@@ -522,7 +522,7 @@
           ;; GC with epoch date (delete nothing by time)
           ;; Note: konserve uses its own last-write timestamps, not our commit timestamps
           ;; In a fast test, all writes happen within ms, so time-based GC won't delete anything
-          (let [deleted (a/<!! (pv/gc! idx (java.util.Date. 0)))]
+          (let [deleted (pv/gc! idx (java.util.Date. 0))]
             ;; Verify GC ran and returned a set (may be empty)
             (is (set? deleted)))
 
@@ -555,7 +555,7 @@
             (pv/close! feature-idx))
 
           ;; Run GC
-          (a/<!! (pv/gc! idx (java.util.Date. 0)))
+          (pv/gc! idx (java.util.Date. 0))
 
           (pv/close! idx))
 
@@ -891,7 +891,7 @@
           (is (= 20 (pv/count-vectors idx)))
 
           ;; GC should preserve all current data
-          (a/<!! (pv/gc! idx (java.util.Date. 0)))
+          (pv/gc! idx (java.util.Date. 0))
 
           ;; Everything should still work
           (is (= 20 (pv/count-vectors idx)))
@@ -924,7 +924,7 @@
                               b)))]
 
             ;; GC
-            (a/<!! (pv/gc! idx (java.util.Date. 0)))
+            (pv/gc! idx (java.util.Date. 0))
 
             ;; Close branches
             (doseq [b branches]
@@ -975,7 +975,7 @@
                       (pv/delete 9))
               idx (a/<!! (pv/sync! idx))
               ;; GC
-              _ (a/<!! (pv/gc! idx (java.util.Date. 0)))
+              _ (pv/gc! idx (java.util.Date. 0))
               ;; Search should return fewer results (deletes removed from graph)
               results (pv/search idx (first vectors) 10)]
           (is (< (count results) 10)
@@ -1009,7 +1009,7 @@
                                (swap! idx-atom #(a/<!! (pv/sync! %))))
                 gc-future (future
                             (Thread/sleep 50)  ; Start GC mid-writes
-                            (a/<!! (pv/gc! @idx-atom (java.util.Date. 0))))]
+                            (pv/gc! @idx-atom (java.util.Date. 0)))]
 
             @write-future
             @gc-future)
@@ -1035,7 +1035,7 @@
         (let [idx (reduce (fn [idx _cycle]
                             (let [idx (insert-n idx 5 32 (fn [_] (swap! id-counter inc)))
                                   idx (a/<!! (pv/sync! idx))]
-                              (a/<!! (pv/gc! idx (java.util.Date. 0)))
+                              (pv/gc! idx (java.util.Date. 0))
                               idx))
                           idx (range 5))]
 
@@ -1068,7 +1068,7 @@
                           idx (range 3))]
 
           ;; Run GC
-          (a/<!! (pv/gc! idx (java.util.Date. 0)))
+          (pv/gc! idx (java.util.Date. 0))
 
           (pv/close! idx))
 
@@ -1114,7 +1114,7 @@
               ;; Run GC with FUTURE date - this forces sweep! to evaluate all keys
               ;; Only whitelisted keys should survive
               future-date (java.util.Date. (+ (System/currentTimeMillis) 86400000))
-              _ (a/<!! (pv/gc! idx future-date))]
+              _ (pv/gc! idx future-date)]
           ;; Data should still be accessible (whitelist preserved it)
           (is (= 20 (pv/count-vectors idx)))
           (let [results-after (pv/search idx (first test-vectors) 10)]
@@ -1170,7 +1170,7 @@
               feature (a/<!! (pv/sync! feature))
               ;; Run GC with future date on main
               future-date (java.util.Date. (+ (System/currentTimeMillis) 86400000))
-              _ (a/<!! (pv/gc! idx future-date))]
+              _ (pv/gc! idx future-date)]
           (pv/close! feature)
           (pv/close! idx))
 

@@ -27,14 +27,50 @@
 ;; -----------------------------------------------------------------------------
 ;; Hash Computation
 
+(def unhashed-commit-keys
+  "Snapshot fields deliberately OUTSIDE the commit hash.
+
+   `:commit-id` because it IS the hash — including it would be circular.
+
+   `:created-at` / `:updated-at` because excluding them is what makes the hash
+   CONTENT-ADDRESSED: two commits describing the same state get the same id and
+   dedupe, whichever wall clock produced them. Chain uniqueness comes from
+   `:parent`, which differs for genuinely successive commits."
+  #{:commit-id :created-at :updated-at})
+
+(defn commit-state
+  "The part of a commit snapshot the hash must cover — everything the commit
+   asserts about the index, minus the fields that cannot or must not be hashed."
+  [snapshot]
+  (apply dissoc snapshot unhashed-commit-keys))
+
 (defn hash-index-commit
-  "Compute combined index commit hash from vector and edge commit hashes.
-   index-commit-hash = hash(parent + vectors-hash + edges-hash)
-   This creates a single hash representing the complete index state."
-  [parent-hash vectors-hash edges-hash]
+  "Compute the commit hash: hash(parent + vectors-hash + edges-hash + state).
+
+   `state` IS THE POINT, and its absence was a tamper hole. The hash used to
+   cover the chunk hashes alone, so every field of the commit snapshot —
+   `:entrypoint`, `:current-max-level`, `:vector-count`, and the PSS roots that
+   point at the metadata and address trees — could be rewritten in the store
+   and `verify-from-cold` still returned `{:valid? true}`. Measured: five of
+   five such tampers went undetected; only chunk bytes were caught.
+
+   It also explains why two indices built from identical data sometimes shared
+   a hash despite having different graphs: HNSW level assignment is randomized
+   (`HnswInsert.randomLevel` uses an unseeded ThreadLocalRandom), the graph
+   state that differed lived only in the snapshot, and the snapshot was not
+   hashed. Identical inputs to the hash, identical output — no collision, just
+   nothing covering the difference.
+
+   Covering the state settles both properties at once. Tampering with any field
+   changes the id. And two independently built indices with different graphs are
+   genuinely DIFFERENT STATES, so they hash differently and should — which is
+   why construction does not need to be deterministic, and the work-stealing
+   insert can stay exactly as it is."
+  [parent-hash vectors-hash edges-hash snapshot]
   (hasch/uuid {:parent parent-hash
                :vectors vectors-hash
-               :edges edges-hash}))
+               :edges edges-hash
+               :state (commit-state snapshot)}))
 
 ;; -----------------------------------------------------------------------------
 ;; Index Accessors
@@ -124,7 +160,25 @@
              {:valid? false :error :edges-invalid :edges-result edges-result}
 
              :else
-             {:valid? true
-              :vectors-verified (:chunks-verified vectors-result)
-              :edges-verified (:chunks-verified edges-result)
-              :commit-id commit-id})))))))
+             ;; SECOND HALF OF VERIFICATION, and the half that was missing.
+             ;; Re-hashing the chunks proves the bytes are intact; it says
+             ;; nothing about the commit that names them. Every snapshot field
+             ;; — the entrypoint, the max level, the counts, and the PSS roots
+             ;; pointing at the metadata and address trees — could be rewritten
+             ;; and this function still returned {:valid? true}. Recomputing the
+             ;; id from the stored snapshot and comparing it to the stored id is
+             ;; what closes that.
+             (let [recomputed (hash-index-commit (first (:parents snapshot))
+                                                 (:vectors-commit-hash snapshot)
+                                                 (:edges-commit-hash snapshot)
+                                                 snapshot)]
+               (if-not (= commit-id recomputed)
+                 {:valid? false
+                  :error :commit-hash-mismatch
+                  :commit-id commit-id
+                  :recomputed recomputed
+                  :note "the commit does not hash to its own id: a snapshot field was altered"}
+                 {:valid? true
+                  :vectors-verified (:chunks-verified vectors-result)
+                  :edges-verified (:chunks-verified edges-result)
+                  :commit-id commit-id})))))))))

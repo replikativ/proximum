@@ -627,11 +627,17 @@ Returns {:copying? bool :finished? bool :delta-count N :mapped-ids N}"
     ;; =========================================================================
 
     gc!
-    {:args [:=> [:cat VectorIndex [:? :any] [:? :map]] [:async [:set :any]]]
-     :ret  [:async [:set :any]]
+    {:args [:=> [:cat VectorIndex [:? :any] [:? :map]] [:set :any]]
+     :ret  [:set :any]
      :doc  "Garbage collect unreachable data from storage.
-Returns channel that delivers set of deleted keys when GC completes.
-Removes commits older than remove-before date."
+Returns the set of deleted keys. Synchronous: konserve's sweep honours :sync?,
+so neither this nor the generated bindings have to expose a channel. In Java,
+park it on a virtual thread if you want it off the calling thread — blocking
+composes into async, and a future-returning method does not compose back into
+blocking without .get() and ExecutionException wrapping.
+`remove-before` bounds HISTORY RETENTION — how far back commits stay
+reachable. It is not the sweep's safety cutoff, which is derived from
+konserve.gc-guard so a commit in flight is never collected."
      :impl proximum.gc/gc!
      :referentially-transparent? false
      :supports-remote? true}

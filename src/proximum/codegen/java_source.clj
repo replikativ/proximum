@@ -692,17 +692,25 @@
 
         /**
          * Convenience method to set storage path with default file backend.
+         *
+         * <p>The konserve store and the mmap'd vector files go in SEPARATE
+         * subdirectories, {@code path/store} and {@code path/mmap}. They used to
+         * share one directory, which put proximum's mmap files among konserve's
+         * blobs — and konserve treats a file it does not recognise in its store
+         * directory as an old-schema blob to migrate, so every key enumeration
+         * tried to migrate the vector file.
+         *
          * @param path directory path for storage
          * @return this builder
          */
         public Builder storagePath(String path) {
             this.storeConfig = Map.of(
                 \"backend\", \":file\",
-                \"path\", path,
+                \"path\", path + \"/store\",
                 \"id\", UUID.randomUUID()
             );
             if (this.mmapDir == null) {
-                this.mmapDir = path;
+                this.mmapDir = path + \"/mmap\";
             }
             return this;
         }
