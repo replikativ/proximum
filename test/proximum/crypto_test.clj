@@ -104,7 +104,6 @@
           (cleanup-path! base1)
           (cleanup-path! base2))))))
 
-
 ;; -----------------------------------------------------------------------------
 ;; What the commit hash COVERS
 ;;

@@ -3,7 +3,7 @@
  ;; For Maven Central deployment, use published dependencies:
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
         org.replikativ/persistent-sorted-set {:mvn/version "0.4.126"}
-        org.replikativ/konserve {:mvn/version "0.9.350"}
+        org.replikativ/konserve {:mvn/version "0.9.375"}
         org.replikativ/hasch {:mvn/version "0.3.96"}
         com.clojure-goes-fast/clj-memory-meter {:mvn/version "0.3.0"}
         org.clojure/core.cache {:mvn/version "1.1.234"}
@@ -18,10 +18,7 @@
         org.slf4j/slf4j-simple {:mvn/version "2.0.16"}}
 
  :aliases
- ;; Sibling checkout, for the konserve gc-guard vertical. proximum needs
- ;; `konserve.gc-guard` and `sweep!`'s `{:sync? true}` support, neither of
- ;; which is released yet — use this until a konserve carrying them is on
- ;; Maven. Every repo in the vertical must point at the SAME checkout.
+ ;; Sibling checkout, for co-development across the replikativ stack.
  {:local {:override-deps {org.replikativ/konserve {:local/root "../konserve"}}}
 
   :dev {:extra-paths ["dev" "test" "benchmark"]
