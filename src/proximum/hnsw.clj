@@ -24,6 +24,7 @@
             [proximum.logging :as log]
             [org.replikativ.persistent-sorted-set :as pss]
             [konserve.core :as k]
+            [proximum.fetch :as fetch]
             [konserve.gc-guard :as guard]
             [konserve.protocols :as kp]
             [clojure.core.async :as a])
@@ -1403,8 +1404,9 @@
 ;; restore-index :hnsw Implementation
 
 (defmethod p/restore-index :hnsw
-  [snapshot edge-store {:keys [mmap-dir mmap-path cache-size]
-                        :or {cache-size 10000}}]
+  [snapshot edge-store {:keys [mmap-dir mmap-path cache-size fetch-width]
+                        :or {cache-size 10000
+                             fetch-width fetch/default-width}}]
   (let [;; Read immutable config from :index/config
         config (k/get edge-store :index/config nil {:sync? true})
         {:keys [dim M M0 max-nodes max-level chunk-size distance crypto-hash? seed]} config
@@ -1470,7 +1472,8 @@
                                 max-nodes
                                 ;; The cache is trusted only if it was stamped
                                 ;; with exactly this commit.
-                                commit-id)
+                                commit-id
+                                {:fetch-width fetch-width})
 
         ;; Create PES and switch to transient mode for initialization
         max-level-int (or max-level 16)
@@ -1486,13 +1489,22 @@
                          (storage/restore-address-pss edges-addr-pss-root pss-store))
         edges-addr-map (or (storage/address-pss-to-map edges-addr-pss) {})
 
-        ;; Load all edge chunks
-        _ (doseq [[pos storage-addr] edges-addr-map]
-            (let [chunk-key (if (instance? java.util.UUID storage-addr)
-                              [:edges :chunk storage-addr]
-                              [:edges :chunk (keyword (str storage-addr))])]
-              (when-let [data (k/get edge-store chunk-key nil {:sync? true})]
-                (.setChunkByAddress pes (long pos) (edges/bytes-to-chunk data)))))
+        ;; Load all edge chunks: FETCH in parallel, APPLY serially. The chunks
+        ;; are eager by design (a search descends through arbitrary nodes, so
+        ;; there is no useful lazy subset) and every address is already in the
+        ;; map, so the old one-blocking-get-per-chunk loop paid chunks x RTT
+        ;; with nothing overlapping — the entire cold-open cost on an object
+        ;; store. Only the reads fan out; the PES, in transient init, is
+        ;; mutated from this one thread as before.
+        _ (let [chunk-data (fetch/fetch-all!
+                            edge-store
+                            (for [[pos storage-addr] edges-addr-map]
+                              [pos (if (instance? java.util.UUID storage-addr)
+                                     [:edges :chunk storage-addr]
+                                     [:edges :chunk (keyword (str storage-addr))])])
+                            fetch-width)]
+            (doseq [[pos data] chunk-data]
+              (.setChunkByAddress pes (long pos) (edges/bytes-to-chunk data))))
 
         ;; Restore deleted state
         _ (when branch-deleted-count
