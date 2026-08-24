@@ -30,10 +30,11 @@
      Bytes 24-31: chunk-size (long)
      Bytes 32-63: reserved
      Byte 64+:    vector data"
-  (:require [konserve.core :as k]
-            [proximum.distance :as dist]
-            [clojure.core.async :as a]
-            [hasch.core :as hasch])
+  (:require
+   [proximum.fetch :as fetch] [konserve.core :as k]
+   [proximum.distance :as dist]
+   [clojure.core.async :as a]
+   [hasch.core :as hasch])
   (:import [jdk.incubator.vector FloatVector VectorOperators]
            [java.nio ByteBuffer ByteOrder MappedByteBuffer]
            [java.nio.channels FileChannel FileChannel$MapMode]
@@ -360,17 +361,21 @@
    restore-index sizes the PersistentEdgeIndex from. Pass nil only when no
    config is available, in which case sizing falls back to the vector count
    plus a fixed headroom."
-  [store dim chunk-size crypto-hash? mmap-path address-map vector-count commit-hash
-   capacity snapshot-commit-id]
-  (let [;; Try to open existing mmap if path provided
-        existing-mmap (when mmap-path (open-existing-mmap mmap-path))
+  ([store dim chunk-size crypto-hash? mmap-path address-map vector-count commit-hash
+    capacity snapshot-commit-id]
+   (open-store* store dim chunk-size crypto-hash? mmap-path address-map vector-count
+                commit-hash capacity snapshot-commit-id {}))
+  ([store dim chunk-size crypto-hash? mmap-path address-map vector-count commit-hash
+    capacity snapshot-commit-id {:keys [fetch-width] :or {fetch-width fetch/default-width}}]
+   (let [;; Try to open existing mmap if path provided
+         existing-mmap (when mmap-path (open-existing-mmap mmap-path))
         ;; Check if existing mmap is compatible
-        mmap-compatible? (and existing-mmap
-                              (= dim (get-in existing-mmap [:header :dim]))
-                              (= chunk-size (get-in existing-mmap [:header :chunk-size])))
-        mmap-header-count (if mmap-compatible?
-                            (get-in existing-mmap [:header :count])
-                            0)
+         mmap-compatible? (and existing-mmap
+                               (= dim (get-in existing-mmap [:header :dim]))
+                               (= chunk-size (get-in existing-mmap [:header :chunk-size])))
+         mmap-header-count (if mmap-compatible?
+                             (get-in existing-mmap [:header :count])
+                             0)
         ;; Determine capacity needed. The created capacity governs, so a
         ;; restored index has exactly the ceiling it was created with:
         ;;   - sizing below it stranded appends at count + headroom, which on
@@ -384,44 +389,44 @@
         ;; The mmap file is sparse, so sizing to the created capacity costs disk
         ;; only as live vectors land - though the apparent size is the full
         ;; capacity, which quotas and backup tools do see.
-        extra-capacity 10000
-        _ (when (and capacity (> vector-count (long capacity)))
+         extra-capacity 10000
+         _ (when (and capacity (> vector-count (long capacity)))
             ;; Sizing up to fit would produce a store that loads and then breaks:
             ;; the PersistentEdgeIndex is built at :max-nodes, so the first
             ;; search past it throws ArrayIndexOutOfBoundsException. Refuse
             ;; instead, in line with the config validation in restore-index.
-            (throw (ex-info "Stored vector count exceeds the index's created capacity"
-                            {:vector-count vector-count
-                             :capacity (long capacity)
-                             :hint "The snapshot and :index/config disagree; the store looks corrupt or hand-edited"})))
-        required-capacity (if capacity
-                            (long capacity)
-                            (+ vector-count extra-capacity))
+             (throw (ex-info "Stored vector count exceeds the index's created capacity"
+                             {:vector-count vector-count
+                              :capacity (long capacity)
+                              :hint "The snapshot and :index/config disagree; the store looks corrupt or hand-edited"})))
+         required-capacity (if capacity
+                             (long capacity)
+                             (+ vector-count extra-capacity))
         ;; Create or reuse mmap
-        actual-mmap-path (or mmap-path
-                             (str (System/getProperty "java.io.tmpdir")
+         actual-mmap-path (or mmap-path
+                              (str (System/getProperty "java.io.tmpdir")
                                   ;; UUID, not currentTimeMillis: two loads in
                                   ;; the same millisecond would otherwise share
                                   ;; one temp file and overwrite each other.
-                                  "/vectors-" (java.util.UUID/randomUUID) ".mmap"))
-        reuse-existing? (and mmap-compatible?
-                             (>= (:capacity existing-mmap) required-capacity))
+                                   "/vectors-" (java.util.UUID/randomUUID) ".mmap"))
+         reuse-existing? (and mmap-compatible?
+                              (>= (:capacity existing-mmap) required-capacity))
         ;; Release a mapping we opened but are not adopting: a shared Arena has
         ;; no cleaner, so dropping it on the floor retains the mapping (and its
         ;; address space) for the life of the process.
-        _ (when (and existing-mmap (not reuse-existing?))
-            (.close ^Arena (:arena existing-mmap)))
+         _ (when (and existing-mmap (not reuse-existing?))
+             (.close ^Arena (:arena existing-mmap)))
         ;; Bind the FILE's capacity separately - it is not the index's ceiling.
         ;; A file written before restores honoured the created capacity is
         ;; routinely larger than :max-nodes, and adopting its size here is what
         ;; let appends past :max-nodes through the guard in hnsw/insert.
-        {:keys [mmap-buf mem-segment arena] file-capacity :capacity}
-        (if reuse-existing?
-          existing-mmap
-          (create-mmap-file actual-mmap-path dim chunk-size required-capacity))
+         {:keys [mmap-buf mem-segment arena] file-capacity :capacity}
+         (if reuse-existing?
+           existing-mmap
+           (create-mmap-file actual-mmap-path dim chunk-size required-capacity))
         ;; The created capacity governs whenever we know it, however big the
         ;; file underneath happens to be.
-        store-capacity (if capacity required-capacity file-capacity)
+         store-capacity (if capacity required-capacity file-capacity)
         ;; Load chunks from konserve that the mmap does not already hold.
         ;; Gate on reuse-existing?, NOT mmap-compatible?: when the mapping is
         ;; rejected (too small) we recreate it, but create-mmap-file setLengths
@@ -442,22 +447,30 @@
         ;; never synced) is never trusted. A mismatch costs a reload from
         ;; konserve, which is the source of truth - being wrong here is slow,
         ;; not incorrect.
-        cache-belongs? (and reuse-existing?
-                            (some? snapshot-commit-id)
-                            (= snapshot-commit-id
-                               (get-in existing-mmap [:header :commit-id])))
-        start-chunk (if cache-belongs?
-                      (chunk-id mmap-header-count chunk-size)
-                      0)
-        end-chunk (if (zero? vector-count)
-                    0
-                    (inc (chunk-id (dec vector-count) chunk-size)))]
-    ;; Load missing chunks using address-map
-    (doseq [cid (range start-chunk end-chunk)]
-      (when-let [addr (get address-map cid)]
-        (let [data (k/get store (chunk-key addr) nil {:sync? true})]
-          (when data
-            (load-chunk-bytes-to-mmap! mmap-buf dim chunk-size cid data)))))
+         cache-belongs? (and reuse-existing?
+                             (some? snapshot-commit-id)
+                             (= snapshot-commit-id
+                                (get-in existing-mmap [:header :commit-id])))
+         start-chunk (if cache-belongs?
+                       (chunk-id mmap-header-count chunk-size)
+                       0)
+         end-chunk (if (zero? vector-count)
+                     0
+                     (inc (chunk-id (dec vector-count) chunk-size)))]
+    ;; Load missing chunks using address-map: FETCH in parallel, APPLY serially
+    ;; (see proximum.fetch). Every chunk lands at its own mmap offset, but the
+    ;; buffer writes stay on this one thread anyway — only the konserve reads,
+    ;; which are the cost, fan out.
+     (let [chunk-data (fetch/fetch-all!
+                       store
+                       (for [cid (range start-chunk end-chunk)
+                             :let [addr (get address-map cid)]
+                             :when addr]
+                         [cid (chunk-key addr)])
+                       fetch-width)]
+       (doseq [cid (range start-chunk end-chunk)]
+         (when-let [data (get chunk-data cid)]
+           (load-chunk-bytes-to-mmap! mmap-buf dim chunk-size cid data))))
     ;; Loading rewrote the file, so restamp it to describe what it now holds.
     ;;
     ;; The stamp has to track CONTENTS, not the last sync. Opening an older or
@@ -471,28 +484,28 @@
     ;;
     ;; It also means a read-only consumer that never syncs still gets a usable
     ;; cache from its second open onward.
-    (when (and snapshot-commit-id (not cache-belongs?))
-      (update-header-count! mmap-buf vector-count)
-      (update-header-commit! mmap-buf snapshot-commit-id)
-      (.force ^MappedByteBuffer mmap-buf))
-    (->VectorStore
-     store
-     dim
-     chunk-size
-     (atom vector-count)
-     (atom [])
-     (atom #{})
-     actual-mmap-path
-     (nil? mmap-path)    ;; owns-mmap-file? - true only if we generated the path
-     mmap-buf
-     mem-segment
-     arena
-     store-capacity
-     crypto-hash?
-     (when crypto-hash? (atom commit-hash))
-     (when crypto-hash? (atom []))
-     (atom (or address-map {})))))  ;; Always create chunk-address-map
-
+     (when (and snapshot-commit-id (not cache-belongs?))
+       (update-header-count! mmap-buf vector-count)
+       (update-header-commit! mmap-buf snapshot-commit-id)
+       (.force ^MappedByteBuffer mmap-buf))
+     (->VectorStore
+      store
+      dim
+      chunk-size
+      (atom vector-count)
+      (atom [])
+      (atom #{})
+      actual-mmap-path
+      (nil? mmap-path)    ;; owns-mmap-file? - true only if we generated the path
+      mmap-buf
+      mem-segment
+      arena
+      store-capacity
+      crypto-hash?
+      (when crypto-hash? (atom commit-hash))
+      (when crypto-hash? (atom []))
+      (atom (or address-map {})))))  ;; Always create chunk-address-map
+  )
 (defn flush-write-buffer-async!
   "Flush pending vectors to konserve asynchronously.
    Fires async k/assoc and adds channel to pending-writes.

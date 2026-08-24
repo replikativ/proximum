@@ -148,13 +148,17 @@
    Options:
      :branch       - Branch keyword to load (default :main)
      :cache-size   - LRU cache size (default 10000)
+     :fetch-width  - concurrent chunk fetches during restore (default 64);
+                     the edge and vector chunks are loaded eagerly, and this
+                     is what turns chunks x RTT into chunks x RTT / width on
+                     a remote store. 1 restores the old serial behaviour.
      :mmap-dir     - Directory for branch mmap files (recommended)
      :mmap-path    - Explicit mmap file path override (advanced)
      :store        - Pre-instantiated Konserve store (optional)
 
    Returns:
      VectorIndex implementation loaded from the specified branch"
-  [store-config & {:keys [branch cache-size mmap-dir mmap-path store]
+  [store-config & {:keys [branch cache-size mmap-dir mmap-path store fetch-width]
                    :or {branch :main
                         cache-size 10000}}]
   (let [store-config (when store-config (normalize-store-config store-config))
@@ -177,9 +181,10 @@
       ;; Dispatch to type-specific restoration
       (p/restore-index (assoc snapshot :index-type index-type)
                        edge-store
-                       {:mmap-dir mmap-dir
-                        :mmap-path mmap-path
-                        :cache-size cache-size}))))
+                       (cond-> {:mmap-dir mmap-dir
+                                :mmap-path mmap-path
+                                :cache-size cache-size}
+                         fetch-width (assoc :fetch-width fetch-width))))))
 
 (defn load-commit
   "Load a historical commit from durable storage.
@@ -191,13 +196,17 @@
    Options:
      :branch       - Branch keyword to attach to returned index (default :main)
      :cache-size   - LRU cache size (default 10000)
+     :fetch-width  - concurrent chunk fetches during restore (default 64);
+                     the edge and vector chunks are loaded eagerly, and this
+                     is what turns chunks x RTT into chunks x RTT / width on
+                     a remote store. 1 restores the old serial behaviour.
      :mmap-dir     - Directory for branch mmap files (recommended)
      :mmap-path    - Explicit mmap file path override (advanced)
      :store        - Pre-instantiated Konserve store (optional)
 
    Returns:
      VectorIndex implementation restored to the specified commit"
-  [store-config commit-id & {:keys [branch cache-size mmap-dir mmap-path store]
+  [store-config commit-id & {:keys [branch cache-size mmap-dir mmap-path store fetch-width]
                              :or {branch :main
                                   cache-size 10000}}]
   (let [store-config (when store-config (normalize-store-config store-config))
@@ -226,7 +235,8 @@
           actual-branch (or snapshot-branch branch)]
       (p/restore-index (assoc snapshot :index-type index-type :branch actual-branch)
                        edge-store
-                       {:mmap-dir mmap-dir
-                        :mmap-path mmap-path
-                        :cache-size cache-size}))))
+                       (cond-> {:mmap-dir mmap-dir
+                                :mmap-path mmap-path
+                                :cache-size cache-size}
+                         fetch-width (assoc :fetch-width fetch-width))))))
 
