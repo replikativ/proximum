@@ -132,10 +132,7 @@ public final class HnswIndex {
      */
     public int insert(float[] vector) {
         checkNotClosed();
-        if (vector.length != dim) {
-            throw new IllegalArgumentException(
-                "Vector dimension mismatch: expected " + dim + ", got " + vector.length);
-        }
+        validateVector(vector, "Vector");
 
         // Append vector to storage
         int nodeId = vectors.append(vector);
@@ -175,13 +172,14 @@ public final class HnswIndex {
         int[] nodeIds = new int[n];
         int[] nodeLevels = new int[n];
 
+        // Validate the complete batch before appending anything. This prevents
+        // an invalid later vector from leaking a partially written batch.
+        for (int i = 0; i < n; i++) {
+            validateVector(vecs[i], "Vector at batch index " + i);
+        }
+
         // Pre-append all vectors (sequential for thread safety)
         for (int i = 0; i < n; i++) {
-            if (vecs[i].length != dim) {
-                throw new IllegalArgumentException(
-                    "Vector dimension mismatch at index " + i +
-                    ": expected " + dim + ", got " + vecs[i].length);
-            }
             nodeIds[i] = vectors.append(vecs[i]);
             nodeLevels[i] = HnswInsert.randomLevel(ml, maxLevel);
         }
@@ -225,10 +223,7 @@ public final class HnswIndex {
      */
     public SearchResult[] search(float[] query, int k, int ef) {
         checkNotClosed();
-        if (query.length != dim) {
-            throw new IllegalArgumentException(
-                "Query dimension mismatch: expected " + dim + ", got " + query.length);
-        }
+        validateVector(query, "Query");
 
         MemorySegment seg = vectors.getSegment();
         double[] raw = HnswSearch.search(seg, edges, query, dim, k, ef);
@@ -247,6 +242,22 @@ public final class HnswIndex {
      */
     public SearchResult[] search(float[] query, int k) {
         return search(query, k, Math.max(k * 10, 100));
+    }
+
+    private void validateVector(float[] vector, String label) {
+        if (vector == null) {
+            throw new IllegalArgumentException(label + " must not be null");
+        }
+        if (vector.length != dim) {
+            throw new IllegalArgumentException(
+                label + " dimension mismatch: expected " + dim + ", got " + vector.length);
+        }
+        for (int i = 0; i < vector.length; i++) {
+            if (!Float.isFinite(vector[i])) {
+                throw new IllegalArgumentException(
+                    label + " component at position " + i + " is not finite");
+            }
+        }
     }
 
     // =========================================================================

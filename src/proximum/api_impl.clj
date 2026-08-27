@@ -56,8 +56,23 @@
   ([idx vectors ids]
    (insert-batch idx vectors ids nil))
   ([idx vectors ids opts]
-   (let [actual-ids (mapv ensure-id ids)
-         metadata-list (or (:metadata opts) (repeat (count vectors) {}))
+   (let [vectors (vec vectors)
+         ids (vec ids)
+         metadata-option (:metadata opts)
+         metadata-option (when metadata-option (vec metadata-option))
+         _ (when-not (= (count vectors) (count ids))
+             (throw (ex-info "Vector and ID counts must match"
+                             {:reason :batch-cardinality-mismatch
+                              :vector-count (count vectors)
+                              :id-count (count ids)})))
+         _ (when (and metadata-option
+                      (not= (count vectors) (count metadata-option)))
+             (throw (ex-info "Vector and metadata counts must match"
+                             {:reason :batch-cardinality-mismatch
+                              :vector-count (count vectors)
+                              :metadata-count (count metadata-option)})))
+         actual-ids (mapv ensure-id ids)
+         metadata-list (or metadata-option (repeat (count vectors) {}))
          metadata-with-ids (mapv (fn [m id] (assoc (or m {}) :external-id id))
                                  metadata-list
                                  actual-ids)]
@@ -170,4 +185,3 @@
       (when (and (>= id 0) (< id capacity))
         (.add bs (int id))))
     bs))
-

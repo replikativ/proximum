@@ -56,35 +56,19 @@ public final class Distance {
      */
     public static void normalizeVector(float[] vector) {
         int dim = vector.length;
-        int upperBound = dim - (dim % SPECIES_LENGTH);
-
-        // SIMD computation of squared norm
-        FloatVector normVec = FloatVector.zero(FLOAT_SPECIES);
-        for (int i = 0; i < upperBound; i += SPECIES_LENGTH) {
-            FloatVector v = FloatVector.fromArray(FLOAT_SPECIES, vector, i);
-            normVec = normVec.add(v.mul(v));
-        }
-        float normSq = normVec.reduceLanes(VectorOperators.ADD);
-
-        // Scalar tail
-        for (int i = upperBound; i < dim; i++) {
-            normSq += vector[i] * vector[i];
+        double normSq = 0.0;
+        for (int i = 0; i < dim; i++) {
+            double value = vector[i];
+            normSq += value * value;
         }
 
         // Normalize if non-zero
-        if (normSq > 1e-12f) {
-            float invNorm = (float) (1.0 / Math.sqrt(normSq));
-
-            // SIMD normalization
-            FloatVector invNormVec = FloatVector.broadcast(FLOAT_SPECIES, invNorm);
-            for (int i = 0; i < upperBound; i += SPECIES_LENGTH) {
-                FloatVector v = FloatVector.fromArray(FLOAT_SPECIES, vector, i);
-                v.mul(invNormVec).intoArray(vector, i);
-            }
-
-            // Scalar tail
-            for (int i = upperBound; i < dim; i++) {
-                vector[i] *= invNorm;
+        if (normSq > 0.0) {
+            double norm = Math.sqrt(normSq);
+            for (int i = 0; i < dim; i++) {
+                // Divide in double precision before narrowing. Computing a
+                // float inverse first overflows for valid tiny nonzero values.
+                vector[i] = (float) (vector[i] / norm);
             }
         }
     }
