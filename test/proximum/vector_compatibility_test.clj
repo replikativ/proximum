@@ -39,6 +39,16 @@
     (is (= :non-finite-component
            (reason #(validation/validate-vector [1.0 Double/MAX_VALUE] 2))))))
 
+(deftest close-is-idempotent-for-shared-index-values
+  (let [idx (test-index 2)
+        with-data (core/insert idx (float-array [1.0 0.0]) :one)
+        first-close (core/close! with-data)
+        second-close (core/close! idx)]
+    (is (identical? first-close second-close)
+        "index values sharing one VectorStore observe one cleanup")
+    (is (nil? (a/<!! first-close)))
+    (is (nil? (a/<!! second-close)))))
+
 (deftest invalid-input-does-not-mutate-storage-test
   (let [idx (test-index 2)]
     (try

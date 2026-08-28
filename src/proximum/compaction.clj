@@ -89,10 +89,10 @@
                         (range vector-count))
          live-count (count live-ids)
 
-         _ (log/info :proximum/compaction "Starting compaction"
-                     {:live-count live-count
-                      :total-count vector-count
-                      :live-percent (* 100.0 (/ live-count (max 1 vector-count)))})
+         _ (log/debug :proximum/compaction "Starting compaction"
+                      {:live-count live-count
+                       :total-count vector-count
+                       :live-percent (* 100.0 (/ live-count (max 1 vector-count)))})
 
          ;; Get index config and create new index of same type
          ;; This is the key polymorphic operation - works for any index type
@@ -282,7 +282,7 @@
                          (range snapshot-count))
           total (count live-ids)]
 
-      (log/info :proximum/compaction "Online compaction: copying live vectors" {:total total})
+      (log/debug :proximum/compaction "Online compaction: copying live vectors" {:total total})
 
       ;; Copy in batches
       (doseq [batch (partition-all batch-size live-ids)]
@@ -313,7 +313,7 @@
                      {:idx idx-after
                       :id-mapping (merge id-mapping new-mappings)})))))
 
-      (log/info :proximum/compaction "Online compaction: copy complete" {:total total})
+      (log/debug :proximum/compaction "Online compaction: copy complete" {:total total})
       (reset! finished? true))
     (catch Exception e
       (log/error :proximum/compaction "Online compaction copy failed"
@@ -788,7 +788,7 @@
   [^CompactionState state]
   (try
     ;; Wait for copy to complete
-    (log/info :proximum/compaction "Finishing online compaction")
+    (log/debug :proximum/compaction "Finishing online compaction")
     @(.-copy-future state)  ;; Will throw if copy failed
 
     (let [{:keys [idx id-mapping]} @(.-batch-state state)
@@ -797,7 +797,7 @@
           ;; Track new ID mappings for inserts during delta apply
           new-mappings (atom {})]
 
-      (log/info :proximum/compaction "Applying delta operations" {:count (count delta-log)})
+      (log/debug :proximum/compaction "Applying delta operations" {:count (count delta-log)})
 
       ;; Apply deltas in order
       (let [final-idx
@@ -834,7 +834,7 @@
              idx
              delta-log)]
 
-        (log/info :proximum/compaction "Online compaction complete, syncing")
+        (log/debug :proximum/compaction "Online compaction complete, syncing")
         ;; Return channel from sync!
         (p/sync! final-idx)))
 
@@ -856,7 +856,7 @@
    Returns:
      Source index (unchanged)"
   [^CompactionState state]
-  (log/info :proximum/compaction "Aborting online compaction")
+  (log/debug :proximum/compaction "Aborting online compaction")
   (future-cancel (.-copy-future state))
   (cleanup-partial-compaction! state)
   (.-source-idx state))
