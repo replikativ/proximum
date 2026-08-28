@@ -988,7 +988,8 @@
     ([idx opts]
     ;; Sync the index to durable storage, creating a commit
     ;; See writing.clj for helper functions
-     (let [state (.-state idx)
+     (let [publish-branch? (get opts :publish-branch? true)
+           state (.-state idx)
            vs (.-vectors idx)
            edge-store (:edge-store state)
            pes (.-pes-edges idx)
@@ -996,7 +997,11 @@
            crypto-hash? (:crypto-hash? state)
           ;; Read previous commit from storage (branch head), not in-memory state
           ;; This is correct even after mutations have invalidated the in-memory commit-id
-           prev-snapshot (when edge-store (k/get edge-store branch nil {:sync? true}))
+           prev-snapshot (when edge-store
+                           (if publish-branch?
+                             (k/get edge-store branch nil {:sync? true})
+                             (when-let [base-commit (:commit-id state)]
+                               (k/get edge-store base-commit nil {:sync? true}))))
            parent-commit-hash (when crypto-hash? (:commit-id prev-snapshot))
 
           ;; Refuse to write a commit that would move the branch somewhere its
@@ -1011,7 +1016,7 @@
           ;; here; so do we.
            restored-from (:restored-from-commit state)
            head-commit (:commit-id prev-snapshot)
-           _ (when (and restored-from head-commit (not= restored-from head-commit))
+           _ (when (and publish-branch? restored-from head-commit (not= restored-from head-commit))
                (throw (ex-info "Refusing to sync: this index is not at the branch head"
                                {:branch branch
                                 :index-restored-from restored-from
@@ -1153,8 +1158,13 @@
                                                      (writing/generate-commit-id false nil))
                                          snapshot (assoc base-snapshot :commit-id commit-id)]
 
-                 ;; Write commit entry and branch head using helper
-                                     (writing/write-commit! edge-store commit-id branch snapshot)
+                 ;; A native commit publishes through its branch head.  An
+                 ;; embedded owner (Datahike, a Yggdrasil composite, ...) only
+                 ;; needs the immutable generation: its own root is the sole
+                 ;; visibility gate.
+                                     (if publish-branch?
+                                       (writing/write-commit! edge-store commit-id branch snapshot)
+                                       (writing/write-generation! edge-store commit-id snapshot))
 
                  ;; Stamp the mmap with the commit its contents now correspond
                  ;; to, so the next open can tell this cache apart from one left
@@ -1199,8 +1209,10 @@
 
                ;; No storage - just return index with updated address-map
                                  (update-hnsw-index idx {:address-map new-address-map})))
-                             (catch Exception e
-                               (throw e))))]
+                             (catch Throwable e
+                               (if (:return-errors? opts)
+                                 e
+                                 (throw e)))))]
          result-chan))))
 
   (close! [idx]

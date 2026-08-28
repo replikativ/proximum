@@ -1,0 +1,137 @@
+(ns proximum.generations-test
+  (:require [clojure.core.async :as a]
+            [clojure.java.io :as io]
+            [clojure.test :refer [deftest is testing]]
+            [konserve.core :as k]
+            [konserve.gc-guard :as guard]
+            [konserve.protocols :as kp]
+            [proximum.core :as core]
+            [proximum.generations :as generations]
+            [proximum.protocols :as p]
+            [proximum.vectors :as vectors]
+            [proximum.writing :as writing]))
+
+(defn- temp-dir []
+  (str (java.nio.file.Files/createTempDirectory
+        "proximum-generations-"
+        (make-array java.nio.file.attribute.FileAttribute 0))))
+
+(defn- delete-tree! [path]
+  (doseq [f (reverse (file-seq (io/file path)))]
+    (io/delete-file f true)))
+
+(defn- source-index [mmap-dir]
+  (a/<!!
+   (p/sync!
+    (core/insert
+     (core/create-index {:type :hnsw
+                         :dim 2
+                         :capacity 32
+                         :crypto-hash? true
+                         :store-config {:backend :memory :id (random-uuid)}
+                         :mmap-dir mmap-dir})
+     (float-array [0.0 0.0]) :base))))
+
+(deftest branch-free-generation-roundtrip
+  (let [dir (temp-dir)
+        source (source-index dir)
+        store (p/raw-storage source)
+        store-id (kp/store-id store)
+        original-head (k/get store :main nil {:sync? true})
+        original-branches (k/get store :branches nil {:sync? true})
+        builder (generations/begin-generation source)]
+    (try
+      (generations/put! builder :new (float-array [1.0 0.0]) {:kind :new})
+      (testing "the private builder does not mutate its source query or mmap"
+        (is (nil? (core/get-vector source :new)))
+        (is (not (identical? (p/vector-storage source)
+                             (p/vector-storage (generations/builder-index builder)))))
+        (is (= 1 (vectors/count-vectors (p/vector-storage source))))
+        (is (= 2 (vectors/count-vectors
+                  (p/vector-storage (generations/builder-index builder))))))
+
+      (let [sealed (generations/seal! builder)
+            generation-id (generations/generation-id sealed)
+            roots (generations/reachable-keys source generation-id)
+            opened (generations/open-generation source generation-id)]
+        (try
+          (testing "seal writes only the immutable generation"
+            (is (= original-head (k/get store :main nil {:sync? true})))
+            (is (= original-branches (k/get store :branches nil {:sync? true})))
+            (is (some? (k/get store generation-id nil {:sync? true})))
+            (is (= [1.0 0.0]
+                   (vec (core/get-vector (generations/generation-index sealed) :new))))
+            (is (nil? (core/get-vector source :new))))
+
+          (testing "an exact-id restore has an independent cache"
+            (is (= generation-id (:generation-id opened)))
+            (is (= [1.0 0.0] (vec (core/get-vector (:index opened) :new))))
+            (is (not= (:mmap-path sealed) (:mmap-path opened))))
+
+          (testing "reachability is exact and sufficient at the storage-key boundary"
+            (is (contains? roots generation-id))
+            (is (contains? roots :index/config))
+            (is (every? #(not= ::missing
+                               (k/get store % ::missing {:sync? true}))
+                        roots)))
+
+          ;; Model the embedding owner durably recording generation-id.
+          (is (guard/in-flight? store-id))
+          (generations/rooted! sealed)
+          (is (not (guard/in-flight? store-id)))
+          (finally
+            (when (= :sealed-unrooted @(:status sealed))
+              (generations/rooted! sealed))
+            (a/<!! (generations/close-view! opened))
+            (a/<!! (generations/close-view! sealed)))))
+      (finally
+        (a/<!! (p/close! source))
+        (delete-tree! dir)))))
+
+(deftest seal-failure-never-publishes-or-mutates-source
+  (let [dir (temp-dir)
+        source (source-index dir)
+        store (p/raw-storage source)
+        store-id (kp/store-id store)
+        original-head (k/get store :main nil {:sync? true})
+        builder (generations/begin-generation source)]
+    (try
+      (generations/put! builder :never-visible (float-array [2.0 0.0]))
+      (let [failure (ex-info "injected immutable-generation write failure"
+                             {:reason :injected-failure})]
+        (is (identical?
+             failure
+             (try
+               (with-redefs [writing/write-generation! (fn [& _] (throw failure))]
+                 (generations/seal! builder))
+               nil
+               (catch Throwable e e)))))
+      (is (= :failed @(:status builder)))
+      (is (guard/in-flight? store-id))
+      (is (= original-head (k/get store :main nil {:sync? true})))
+      (is (nil? (core/get-vector source :never-visible)))
+      (finally
+        (a/<!! (generations/discard! builder))
+        (is (not (guard/in-flight? store-id)))
+        (a/<!! (p/close! source))
+        (delete-tree! dir)))))
+
+(deftest contaminated-source-handle-is-rejected
+  (let [dir (temp-dir)
+        source (source-index dir)
+        ;; Current Proximum descendants share the source VectorStore.  This is
+        ;; the condition the generation boundary must detect, not bless.
+        descendant (core/insert source (float-array [3.0 0.0]) :descendant)]
+    (try
+      (is (= 1 (p/vector-count-total source)))
+      (is (= 2 (vectors/count-vectors (p/vector-storage source))))
+      (is (= :generation-source-storage-mutated
+             (try
+               (generations/begin-generation source)
+               nil
+               (catch clojure.lang.ExceptionInfo e
+                 (:reason (ex-data e))))))
+      (finally
+        ;; One close only: these two legacy values share the same VectorStore.
+        (a/<!! (p/close! descendant))
+        (delete-tree! dir)))))

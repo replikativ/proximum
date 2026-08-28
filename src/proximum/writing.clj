@@ -108,6 +108,15 @@
   (k/assoc store commit-id snapshot {:immutable? true} {:sync? true}) ; content-addressed commit
   (k/assoc store branch snapshot {:sync? true}))                       ; mutable branch head
 
+(defn write-generation!
+  "Write an immutable index generation without moving a named branch head.
+
+   The returned commit id is only made visible when an owner records it in its
+   own durable root (for example, Datahike's database root).  Callers must keep
+   the store GC guard held until that owner root has landed."
+  [store commit-id snapshot]
+  (k/assoc store commit-id snapshot {:immutable? true} {:sync? true}))
+
 (defn generate-commit-id
   "Generate a commit ID based on crypto-hash settings.
 
@@ -239,4 +248,3 @@
                                 :mmap-path mmap-path
                                 :cache-size cache-size}
                          fetch-width (assoc :fetch-width fetch-width))))))
-

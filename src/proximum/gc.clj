@@ -80,7 +80,7 @@
         {:pss-addrs #{pss-root} :chunk-keys #{}}))
     {:pss-addrs #{} :chunk-keys #{}}))
 
-(defn- mark-snapshot
+(defn snapshot-reachable-keys
   "Collect all storage keys referenced by a single snapshot.
 
    Returns set of keys including:
@@ -127,6 +127,22 @@
      (:chunk-keys edges-result)
      meta-pss-addrs
      ext-pss-addrs)))
+
+(defn generation-reachable-keys
+  "Return every durable key required to restore one immutable generation.
+
+   This deliberately does not traverse parents: a Proximum snapshot contains
+   complete vector, graph, metadata and external-id roots.  Parent ids describe
+   history, not restore dependencies."
+  [store storage generation-id]
+  (let [snapshot (k/get store generation-id nil {:sync? true})]
+    (when-not snapshot
+      (throw (ex-info "Generation not found"
+                      {:generation-id generation-id
+                       :reason :generation-not-found})))
+    (-> (snapshot-reachable-keys snapshot storage)
+        (conj generation-id)
+        (conj :index/config))))
 
 ;; -----------------------------------------------------------------------------
 ;; Reachability Analysis
@@ -183,7 +199,7 @@
                    (let [parents (:parents snapshot #{})
                           ;; Filter out branch keywords from parents - they're tracked separately
                          parent-commits (remove keyword? parents)
-                         snapshot-keys (mark-snapshot snapshot storage)
+                         snapshot-keys (snapshot-reachable-keys snapshot storage)
                          new-wl (-> wl
                                     (conj ref)  ; The commit/branch key itself
                                      ;; ...AND the commit it names. A branch head is

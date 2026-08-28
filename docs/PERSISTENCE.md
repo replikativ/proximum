@@ -21,6 +21,38 @@ The persistence layer consists of three main components:
 
 This document focuses on **PersistentEdgeIndex**, the most complex component.
 
+## Embedded immutable generations
+
+Named Proximum branches are convenient for standalone use, but an embedding
+database must not move a Proximum branch head before its own transaction commits.
+`proximum.generations` provides the lower-level protocol:
+
+```clojure
+(let [builder (generations/begin-generation sealed-source)]
+  (generations/put! builder entity-id vector metadata)
+  (let [generation (generations/seal! builder)]
+    ;; Atomically record this id in the embedding database's root.
+    (owner-commit! (generations/generation-id generation))
+    (generations/rooted! generation)))
+```
+
+`seal!` writes a complete immutable snapshot and does not change a native branch
+head or branch registry. `open-generation` restores only by that snapshot id,
+and `reachable-keys` returns the exact transitive Konserve key set for unified
+GC. A builder holds the store's unreferenced-write guard until `rooted!` or
+`discard!`, including across vector writes that occur before sealing.
+
+The current builder deliberately uses an independent mmap. On a filesystem with
+reflinks this is copy-on-write; otherwise it is a full-file copy. This makes the
+protocol correct but not yet suitable for small, high-frequency transactions on
+large indices. A delta/tombstone generation layer or equivalent append overlay
+is required before using this as Datahike's normal write path.
+
+Do not derive a builder from an old `HnswIndex` handle after mutating one of its
+descendants. Current ordinary index values share their vector writer even though
+their logical graph and metadata roots differ; `begin-generation` detects and
+rejects that contaminated source rather than sealing it.
+
 ---
 
 ## PersistentEdgeIndex (PEI)
@@ -717,4 +749,3 @@ All three storage layers converge at Konserve, which provides:
 - **Structural sharing**: Unchanged chunks are reused across commits
 - **Backend flexibility**: File, memory, S3, GCS, etc.
 - **Merkle-tree semantics**: Content-based addressing and integrity verification
-
