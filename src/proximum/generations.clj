@@ -364,14 +364,22 @@
 (defn rooted!
   "Acknowledge that an owner durably recorded this generation id.
 
-   Releases the unreferenced-write guard.  This does not move any Proximum
-   branch ref."
+   Releases the unreferenced-write guard. This does not move any Proximum
+   branch ref. Acknowledgement is idempotent because an embedding owner may
+   prepare the same immutable generation for overlapping commit attempts; each
+   successful attempt is allowed to acknowledge the generation it published."
   [^SealedGeneration generation]
   (locking (:status generation)
-    (ensure-status! (:status generation) :sealed-unrooted "rooted!")
-    (guard/done! (:store-id generation) (:guard-token generation))
-    (reset! (:status generation) :rooted)
-    generation))
+    (case @(:status generation)
+      :sealed-unrooted
+      (do
+        (guard/done! (:store-id generation) (:guard-token generation))
+        (reset! (:status generation) :rooted)
+        generation)
+
+      :rooted generation
+
+      (ensure-status! (:status generation) :sealed-unrooted "rooted!"))))
 
 (defn generation-id [generation]
   (:generation-id generation))

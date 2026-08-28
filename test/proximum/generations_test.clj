@@ -178,6 +178,8 @@
             (is (zero? (p/vector-count-total (:index opened)))))
 
           (generations/rooted! sealed)
+          (is (identical? sealed (generations/rooted! sealed))
+              "a second owner may acknowledge the same immutable generation")
           (is (not (guard/in-flight? store-id)))
           (finally
             (when (= :sealed-unrooted @(:status sealed))
