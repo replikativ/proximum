@@ -269,7 +269,8 @@ Storage operations are non-blocking and return immediately for efficient I/O:
 **Async Operations:**
 - `sync!` / `sync()` - Persist changes and create commit
 - `flush!` / `flush()` - Force pending writes to storage
-- `gc!` / `gc()` - Garbage collect unreachable commits
+- `gc!` / `gc()` - Garbage collect unreachable commits (detached embedding
+  generations require the owner's complete `:generation-ids` root set)
 - `close!` / `close()` - Release resources (mmap, file handles)
 
 **Clojure - Blocking:**

@@ -138,6 +138,25 @@
       (throw (ex-info "Generation config requires :store or :store-config"
                       {:reason :generation-requires-storage}))))
 
+(defn- configured-bootstrap-store
+  [{:keys [store store-config]}]
+  (or store
+      (when store-config
+        (let [config (dissoc (storage/normalize-store-config store-config) :opts)]
+          (if (k/store-exists? config {:sync? true})
+            (k/connect-store config {:sync? true})
+            (try
+              (k/create-store config {:sync? true})
+              (catch Throwable creation-failure
+                ;; Another bootstrap may have won between exists? and create.
+                ;; Only recover when the store demonstrably exists now; a real
+                ;; creation failure must retain its original cause.
+                (if (k/store-exists? config {:sync? true})
+                  (k/connect-store config {:sync? true})
+                  (throw creation-failure)))))))
+      (throw (ex-info "Generation config requires :store or :store-config"
+                      {:reason :generation-requires-storage}))))
+
 (defn begin-generation-from-config
   "Create a private, rootless generation builder from index configuration.
 
@@ -157,12 +176,52 @@
     (when-not mmap-dir
       (throw (ex-info "Generation builders require :mmap-dir"
                       {:reason :generation-requires-mmap-dir})))
-    (let [raw-store (configured-store config)
+    (let [raw-store (configured-bootstrap-store config)
           store-id (kp/store-id raw-store)]
       (when-not store-id
         (throw (ex-info "Generation builders require a stable Konserve store id"
                         {:reason :generation-requires-store-id})))
-      (let [workspace-id (keyword "proximum.generation" (str (random-uuid)))
+      (let [existing-config (k/get raw-store :index/config nil {:sync? true})
+            incompatible
+            (when existing-config
+              (seq
+               (keep (fn [[requested-key stored-key]]
+                       (when (and (contains? config requested-key)
+                                  (not= (get config requested-key)
+                                        (get existing-config stored-key)))
+                         {:key requested-key
+                          :requested (get config requested-key)
+                          :stored (get existing-config stored-key)}))
+                     [[:dim :dim]
+                      [:type :index-type]
+                      [:distance :distance]
+                      [:capacity :max-nodes]
+                      [:M :M]
+                      [:max-levels :max-level]
+                      [:chunk-size :chunk-size]
+                      [:crypto-hash? :crypto-hash?]
+                      [:ef-construction :ef-construction]
+                      [:ef-search :ef-search]
+                      [:seed :seed]])))
+            _ (when incompatible
+                (throw (ex-info
+                        "Generation config conflicts with this store's immutable index config"
+                        {:reason :generation-config-conflict
+                         :conflicts (vec incompatible)})))
+            config (cond-> config
+                     existing-config
+                     (merge {:type (:index-type existing-config)
+                             :dim (:dim existing-config)
+                             :distance (:distance existing-config)
+                             :capacity (:max-nodes existing-config)
+                             :M (:M existing-config)
+                             :max-levels (:max-level existing-config)
+                             :chunk-size (:chunk-size existing-config)
+                             :crypto-hash? (:crypto-hash? existing-config)
+                             :ef-construction (:ef-construction existing-config)
+                             :ef-search (:ef-search existing-config)
+                             :seed (:seed existing-config)}))
+            workspace-id (keyword "proximum.generation" (str (random-uuid)))
             token (guard/writing! store-id)]
         (try
           (let [private-index
@@ -317,6 +376,7 @@
         mmap-path (unique-generation-mmap mmap-dir generation-id)
         idx (writing/load-commit nil generation-id
                                  :store raw-store
+                                 :mmap-dir mmap-dir
                                  :mmap-path mmap-path)]
     (->GenerationView idx (p/current-commit idx) mmap-path (atom false))))
 

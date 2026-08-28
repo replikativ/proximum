@@ -1416,10 +1416,7 @@
                        :mmap-dir mmap-dir}))
         actual-mmap-path (or mmap-path
                              (when mmap-dir (vectors/branch-mmap-path mmap-dir branch)))
-        ;; Write global immutable config (includes :index-type for restore-index dispatch)
-        _ (when base-store
-            (k/assoc base-store :index/config
-                     {:index-type :hnsw  ;; NEW: for restore-index dispatch
+        index-config {:index-type :hnsw
                       :dim dim
                       :M M
                       :M0 M0
@@ -1430,18 +1427,39 @@
                       :crypto-hash? crypto-hash?
                       ;; Construction parameters belong here, not in the branch
                       ;; snapshot: they are immutable for the life of the index
-                      ;; and every insert depends on them. restore-index used to
-                      ;; read them from the snapshot, which never carried them,
-                      ;; so a reloaded index silently switched to ml=0.36067 and
-                      ;; ef-construction=200 whatever it was built with.
+                      ;; and every insert depends on them.
                       :ml ml
                       :ef-construction ef-c
                       :ef-search ef-s
-                      ;; Immutable like the rest of this map: the seed governs
-                      ;; level assignment, so changing it after the fact would
-                      ;; make later inserts inconsistent with earlier ones.
+                      ;; The seed governs level assignment, so changing it after
+                      ;; the fact makes later inserts inconsistent with earlier
+                      ;; ones.
                       :seed seed}
-                     {:sync? true}))
+        ;; Initialize the store-wide config atomically and refuse drift. `update`
+        ;; is intentional: two bootstraps may both observe an empty store, and a
+        ;; read followed by `assoc` would let the last incompatible writer win.
+        _ (when base-store
+            (k/update
+             base-store :index/config
+             (fn [stored]
+               (cond
+                 (nil? stored) index-config
+                 (= stored index-config) stored
+                 :else
+                 (throw
+                  (ex-info
+                   "Index creation conflicts with this store's immutable index config"
+                   {:reason :index-config-conflict
+                    :stored stored
+                    :requested index-config
+                    :conflicting-keys
+                    (into #{}
+                          (keep (fn [key]
+                                  (when (not= (get stored key ::missing)
+                                              (get index-config key ::missing))
+                                    key)))
+                          (into (set (keys stored)) (keys index-config)))}))))
+             {:sync? true}))
         _ (when (and base-store register-branch?)
             (k/update base-store :branches #(conj (or % #{}) branch) {:sync? true}))
         pss-store (storage/create-storage base-store {:cache-size cache-size

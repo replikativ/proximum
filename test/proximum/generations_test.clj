@@ -32,6 +32,76 @@
                          :mmap-dir mmap-dir})
      (float-array [0.0 0.0]) :base))))
 
+(deftest rootless-bootstrap-creates-connects-and-validates-store
+  (let [dir (temp-dir)
+        store-id (random-uuid)
+        store-config {:backend :memory :id store-id}
+        config {:type :hnsw
+                :dim 2
+                :capacity 32
+                :M 8
+                :crypto-hash? true
+                :store-config store-config
+                :mmap-dir dir}
+        first-builder (atom nil)
+        second-builder (atom nil)]
+    (try
+      (is (false? (k/store-exists? store-config {:sync? true})))
+      (reset! first-builder (generations/begin-generation-from-config config))
+      (let [raw-store (p/raw-storage
+                       (generations/builder-index @first-builder))
+            stored-config (k/get raw-store :index/config nil {:sync? true})]
+        (is (true? (k/store-exists? store-config {:sync? true})))
+        (is (= 2 (:dim stored-config)))
+        (is (= 8 (:M stored-config)))
+        (is (nil? (k/get raw-store :branches nil {:sync? true})))
+        (a/<!! (generations/discard! @first-builder))
+        (reset! first-builder nil)
+
+        (testing "an existing store is connected, not recreated"
+          (reset! second-builder
+                  (generations/begin-generation-from-config config))
+          (is (= stored-config
+                 (k/get raw-store :index/config nil {:sync? true})))
+          (is (nil? (k/get raw-store :branches nil {:sync? true})))
+          (a/<!! (generations/discard! @second-builder))
+          (reset! second-builder nil))
+
+        (testing "an incompatible retry is rejected without changing config"
+          (let [failure (try
+                          (generations/begin-generation-from-config
+                           (assoc config :dim 3))
+                          nil
+                          (catch clojure.lang.ExceptionInfo e e))]
+            (is (= :generation-config-conflict
+                   (:reason (ex-data failure))))
+            (is (= stored-config
+                   (k/get raw-store :index/config nil {:sync? true})))
+            (is (not (guard/in-flight? store-id)))))
+
+        (testing "the underlying index initializer also refuses config drift"
+          (let [failure (try
+                          (core/create-index
+                           {:type :hnsw
+                            :dim 3
+                            :capacity 32
+                            :M 8
+                            :crypto-hash? true
+                            :store raw-store
+                            :mmap-dir dir})
+                          nil
+                          (catch clojure.lang.ExceptionInfo e e))]
+            (is (= :index-config-conflict
+                   (:reason (ex-data failure))))
+            (is (= stored-config
+                   (k/get raw-store :index/config nil {:sync? true}))))))
+      (finally
+        (when @first-builder
+          (a/<!! (generations/discard! @first-builder)))
+        (when @second-builder
+          (a/<!! (generations/discard! @second-builder)))
+        (delete-tree! dir)))))
+
 (deftest empty-rootless-generation-roundtrip
   (let [dir (temp-dir)
         raw-store (k/create-store {:backend :memory :id (random-uuid)}
