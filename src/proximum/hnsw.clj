@@ -1411,9 +1411,13 @@
                               (.exists (java.io.File. ^String mmap-dir)))
                      (vectors/test-reflink-support mmap-dir))
         _ (when (false? reflink-ok)
-            (log/warn :proximum/connect "Filesystem does not support reflink (copy-on-write)"
-                      {:hint "Branch operations will use full file copies. Consider Btrfs, XFS, or ZFS for O(1) branching."
-                       :mmap-dir mmap-dir}))
+            ;; A normal capability result, not a correctness failure. This runs
+            ;; for every generation open and overwhelmed test/REPL output on
+            ;; ext4. Callers can inspect `reflink-supported?`; keep the detail
+            ;; at debug level for diagnostics.
+            (log/debug :proximum/connect "Filesystem does not support reflink (copy-on-write)"
+                       {:hint "Branch operations will use full file copies. Consider Btrfs, XFS, or ZFS for O(1) branching."
+                        :mmap-dir mmap-dir}))
         actual-mmap-path (or mmap-path
                              (when mmap-dir (vectors/branch-mmap-path mmap-dir branch)))
         index-config {:index-type :hnsw
