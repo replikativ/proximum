@@ -173,33 +173,49 @@
             (guard/done! store-id token)
             (throw e)))))))
 
+(defn- validate-store-owner!
+  [config raw-store]
+  (let [store-id (kp/store-id raw-store)]
+    (when (= (:forbidden-store-id config) store-id)
+      (throw
+       (ex-info
+        "The generation store must not be the embedding owner's primary store."
+        {:type :proximum/generation-store-forbidden
+         :reason :generation-store-forbidden
+         :store-id store-id})))
+    raw-store))
+
 (defn- configured-store
-  [{:keys [store store-config]}]
-  (or store
-      (when store-config
-        (storage/connect-store-sync
-         (storage/normalize-store-config store-config)))
-      (throw (ex-info "Generation config requires :store or :store-config"
-                      {:reason :generation-requires-storage}))))
+  [{:keys [store store-config] :as config}]
+  (validate-store-owner!
+   config
+   (or store
+       (when store-config
+         (storage/connect-store-sync
+          (storage/normalize-store-config store-config)))
+       (throw (ex-info "Generation config requires :store or :store-config"
+                       {:reason :generation-requires-storage})))))
 
 (defn- configured-bootstrap-store
-  [{:keys [store store-config]}]
-  (or store
-      (when store-config
-        (let [config (dissoc (storage/normalize-store-config store-config) :opts)]
-          (if (k/store-exists? config {:sync? true})
-            (k/connect-store config {:sync? true})
-            (try
-              (k/create-store config {:sync? true})
-              (catch Throwable creation-failure
-                ;; Another bootstrap may have won between exists? and create.
-                ;; Only recover when the store demonstrably exists now; a real
-                ;; creation failure must retain its original cause.
-                (if (k/store-exists? config {:sync? true})
-                  (k/connect-store config {:sync? true})
-                  (throw creation-failure)))))))
-      (throw (ex-info "Generation config requires :store or :store-config"
-                      {:reason :generation-requires-storage}))))
+  [{:keys [store store-config] :as generation-config}]
+  (validate-store-owner!
+   generation-config
+   (or store
+       (when store-config
+         (let [config (dissoc (storage/normalize-store-config store-config) :opts)]
+           (if (k/store-exists? config {:sync? true})
+             (k/connect-store config {:sync? true})
+             (try
+               (k/create-store config {:sync? true})
+               (catch Throwable creation-failure
+                 ;; Another bootstrap may have won between exists? and create.
+                 ;; Only recover when the store demonstrably exists now; a real
+                 ;; creation failure must retain its original cause.
+                 (if (k/store-exists? config {:sync? true})
+                   (k/connect-store config {:sync? true})
+                   (throw creation-failure)))))))
+       (throw (ex-info "Generation config requires :store or :store-config"
+                       {:reason :generation-requires-storage})))))
 
 (defn begin-generation-from-config
   "Create a private, rootless generation builder from index configuration.
@@ -214,7 +230,9 @@
    unavailable; this API deliberately does not implement a delta overlay.
 
    Required config keys are the ordinary HNSW creation keys plus `:mmap-dir`
-   and either `:store` or `:store-config`."
+   and either `:store` or `:store-config`. An embedding owner can pass its own
+   canonical Konserve id as `:forbidden-store-id`; the connected generation
+   store is then refused when its live `PStoreConfig` identity matches."
   [config]
   (let [mmap-dir (:mmap-dir config)]
     (when-not mmap-dir
@@ -271,7 +289,7 @@
           (let [private-index
                 (p/create-index
                  (-> config
-                     (dissoc :store-config)
+                     (dissoc :store-config :forbidden-store-id)
                      (assoc :store raw-store
                             :branch workspace-id
                             :register-branch? false)))

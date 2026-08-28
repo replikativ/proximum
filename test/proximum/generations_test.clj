@@ -102,6 +102,34 @@
           (a/<!! (generations/discard! @second-builder)))
         (delete-tree! dir)))))
 
+(deftest generation-config-refuses-the-embedding-owners-live-store
+  (let [dir (temp-dir)
+        configured-id (random-uuid)
+        raw-store (k/create-store {:backend :memory :id configured-id}
+                                  {:sync? true})
+        live-id (kp/store-id raw-store)
+        config {:type :hnsw
+                :dim 2
+                :capacity 32
+                :store raw-store
+                ;; The prohibition is checked against `kp/store-id` on this
+                ;; connected store, not against an independently supplied
+                ;; `:store-config :id` alias.
+                :forbidden-store-id live-id
+                :mmap-dir dir}]
+    (try
+      (let [failure (try
+                      (generations/begin-generation-from-config config)
+                      nil
+                      (catch clojure.lang.ExceptionInfo e e))]
+        (is (= :proximum/generation-store-forbidden
+               (:type (ex-data failure))))
+        (is (= live-id (:store-id (ex-data failure))))
+        (is (nil? (k/get raw-store :index/config nil {:sync? true})))
+        (is (not (guard/in-flight? live-id))))
+      (finally
+        (delete-tree! dir)))))
+
 (deftest empty-rootless-generation-roundtrip
   (let [dir (temp-dir)
         raw-store (k/create-store {:backend :memory :id (random-uuid)}
