@@ -1361,14 +1361,15 @@
 (defmethod p/create-index :hnsw
   [{:keys [dim M ef-construction ef-search distance capacity
            max-levels chunk-size cache-size branch crypto-hash?
-           seed store store-config mmap-dir mmap-path]
+           seed store store-config mmap-dir mmap-path register-branch?]
     :or {M 16
          distance :euclidean
          max-levels nil
          chunk-size 1000
          cache-size 10000
          branch :main
-         crypto-hash? false}}]
+         crypto-hash? false
+         register-branch? true}}]
   (when-not dim
     (throw (ex-info ":dim is required" {})))
   ;; Checked here rather than at first insert: the seed is written into the
@@ -1441,7 +1442,7 @@
                       ;; make later inserts inconsistent with earlier ones.
                       :seed seed}
                      {:sync? true}))
-        _ (when base-store
+        _ (when (and base-store register-branch?)
             (k/update base-store :branches #(conj (or % #{}) branch) {:sync? true}))
         pss-store (storage/create-storage base-store {:cache-size cache-size
                                                       :crypto-hash? crypto-hash?})

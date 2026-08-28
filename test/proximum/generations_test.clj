@@ -32,6 +32,91 @@
                          :mmap-dir mmap-dir})
      (float-array [0.0 0.0]) :base))))
 
+(deftest empty-rootless-generation-roundtrip
+  (let [dir (temp-dir)
+        raw-store (k/create-store {:backend :memory :id (random-uuid)}
+                                  {:sync? true})
+        store-id (kp/store-id raw-store)
+        config {:type :hnsw
+                :dim 2
+                :capacity 32
+                :crypto-hash? true
+                :store raw-store
+                :mmap-dir dir}
+        builder (generations/begin-generation-from-config config)
+        workspace-id (:workspace-id builder)]
+    (try
+      (testing "construction is guarded but publishes no Proximum ref"
+        (is (guard/in-flight? store-id))
+        (is (zero? (p/vector-count-total
+                    (generations/builder-index builder))))
+        (is (nil? (k/get raw-store :main nil {:sync? true})))
+        (is (nil? (k/get raw-store :branches nil {:sync? true})))
+        (is (nil? (k/get raw-store workspace-id nil {:sync? true})))
+        (is (some? (k/get raw-store :index/config nil {:sync? true}))))
+
+      (let [sealed (generations/seal! builder)
+            generation-id (generations/generation-id sealed)
+            snapshot (k/get raw-store generation-id nil {:sync? true})
+            roots (generations/reachable-keys config generation-id)
+            opened (generations/open-generation config generation-id)]
+        (try
+          (testing "an empty generation is an immutable root with no native branch"
+            (is (= #{} (:parents snapshot)))
+            (is (some? snapshot))
+            (is (zero? (p/vector-count-total
+                        (generations/generation-index sealed))))
+            (is (nil? (k/get raw-store :main nil {:sync? true})))
+            (is (nil? (k/get raw-store :branches nil {:sync? true})))
+            (is (nil? (k/get raw-store workspace-id nil {:sync? true}))))
+
+          (testing "config-only reachability and exact restore are sufficient"
+            (is (contains? roots generation-id))
+            (is (contains? roots :index/config))
+            (is (every? #(not= ::missing
+                               (k/get raw-store % ::missing {:sync? true}))
+                        roots))
+            (is (= generation-id (:generation-id opened)))
+            (is (zero? (p/vector-count-total (:index opened)))))
+
+          (generations/rooted! sealed)
+          (is (not (guard/in-flight? store-id)))
+          (finally
+            (when (= :sealed-unrooted @(:status sealed))
+              (generations/rooted! sealed))
+            (a/<!! (generations/close-view! opened))
+            (a/<!! (generations/close-view! sealed)))))
+      (finally
+        (when-not (#{:rooted :discarded} @(:status builder))
+          (a/<!! (generations/discard! builder)))
+        (delete-tree! dir)))))
+
+(deftest rootless-construction-failure-releases-guard
+  (let [dir (temp-dir)
+        raw-store (k/create-store {:backend :memory :id (random-uuid)}
+                                  {:sync? true})
+        store-id (kp/store-id raw-store)
+        failure (ex-info "injected rootless construction failure"
+                         {:reason :injected-failure})]
+    (try
+      (is (identical?
+           failure
+           (try
+             (with-redefs [p/create-index (fn [_] (throw failure))]
+               (generations/begin-generation-from-config
+                {:type :hnsw
+                 :dim 2
+                 :capacity 32
+                 :store raw-store
+                 :mmap-dir dir}))
+             nil
+             (catch Throwable e e))))
+      (is (not (guard/in-flight? store-id)))
+      (is (nil? (k/get raw-store :main nil {:sync? true})))
+      (is (nil? (k/get raw-store :branches nil {:sync? true})))
+      (finally
+        (delete-tree! dir)))))
+
 (deftest branch-free-generation-roundtrip
   (let [dir (temp-dir)
         source (source-index dir)

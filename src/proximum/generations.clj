@@ -20,6 +20,7 @@
             [proximum.hnsw]
             [proximum.hnsw.internal :as hi]
             [proximum.protocols :as p]
+            [proximum.storage :as storage]
             [proximum.vectors :as vectors]
             [proximum.writing :as writing])
   (:import [java.io File]
@@ -128,6 +129,57 @@
             (guard/done! store-id token)
             (throw e)))))))
 
+(defn- configured-store
+  [{:keys [store store-config]}]
+  (or store
+      (when store-config
+        (storage/connect-store-sync
+         (storage/normalize-store-config store-config)))
+      (throw (ex-info "Generation config requires :store or :store-config"
+                      {:reason :generation-requires-storage}))))
+
+(defn begin-generation-from-config
+  "Create a private, rootless generation builder from index configuration.
+
+   Unlike ordinary `create-index`, this does not create a native branch, head,
+   or branch-registry entry.  It does write the store-wide immutable index
+   configuration needed to reopen a sealed generation.  The GC guard is held
+   before that write and remains held until `rooted!` or `discard!`.
+
+   This is the efficient empty/bootstrap case.  Continuing from an existing
+   generation still copies its full mmap when filesystem reflinks are
+   unavailable; this API deliberately does not implement a delta overlay.
+
+   Required config keys are the ordinary HNSW creation keys plus `:mmap-dir`
+   and either `:store` or `:store-config`."
+  [config]
+  (let [mmap-dir (:mmap-dir config)]
+    (when-not mmap-dir
+      (throw (ex-info "Generation builders require :mmap-dir"
+                      {:reason :generation-requires-mmap-dir})))
+    (let [raw-store (configured-store config)
+          store-id (kp/store-id raw-store)]
+      (when-not store-id
+        (throw (ex-info "Generation builders require a stable Konserve store id"
+                        {:reason :generation-requires-store-id})))
+      (let [workspace-id (keyword "proximum.generation" (str (random-uuid)))
+            token (guard/writing! store-id)]
+        (try
+          (let [private-index
+                (p/create-index
+                 (-> config
+                     (dissoc :store-config)
+                     (assoc :store raw-store
+                            :branch workspace-id
+                            :register-branch? false)))
+                mmap-path (:mmap-path (p/vector-storage private-index))]
+            (->GenerationBuilder
+             (atom private-index) nil workspace-id mmap-path
+             store-id token (atom :open) (atom false)))
+          (catch Throwable e
+            (guard/done! store-id token)
+            (throw e)))))))
+
 (defn put!
   "Insert `id` into a private builder and return the same builder."
   ([builder id vector] (put! builder id vector nil))
@@ -162,8 +214,9 @@
     (ensure-status! (:status builder) :open "seal!")
     (reset! (:status builder) :sealing)
     (try
-      (let [result (a/<!! (p/sync! @(:index-atom builder)
-                                   {:parents #{(:source-generation builder)}
+      (let [parents (if-let [source (:source-generation builder)] #{source} #{})
+            result (a/<!! (p/sync! @(:index-atom builder)
+                                   {:parents parents
                                     :publish-branch? false
                                     :return-errors? true}))]
         (if (instance? Throwable result)
@@ -205,11 +258,44 @@
 (defn generation-index [generation]
   (:index generation))
 
+(defn- index-handle [source]
+  (cond
+    (instance? GenerationBuilder source) @(:index-atom source)
+    (or (instance? SealedGeneration source)
+        (instance? GenerationView source)) (:index source)
+    :else source))
+
+(defn- generation-config?
+  [source]
+  (let [idx (index-handle source)]
+    (and (map? source)
+         (not (satisfies? p/IndexState idx))
+         (or (contains? source :store)
+             (contains? source :store-config)))))
+
+(defn- source-store-and-storage
+  [source]
+  (if (generation-config? source)
+    (let [raw-store (configured-store source)
+          index-config (k/get raw-store :index/config nil {:sync? true})]
+      (when-not index-config
+        (throw (ex-info "Proximum index configuration not found"
+                        {:reason :generation-config-not-found})))
+      [raw-store
+       (storage/create-storage raw-store
+                               {:cache-size (or (:cache-size source) 10000)
+                                :crypto-hash? (:crypto-hash? index-config)})])
+    (let [idx (index-handle source)]
+      [(p/raw-storage idx) (p/storage idx)])))
+
 (defn reachable-keys
-  "Return the exact Konserve key set needed to restore `generation-id`."
+  "Return the exact Konserve key set needed to restore `generation-id`.
+
+   `source` may be an index/generation handle or a config containing `:store`
+   or `:store-config`."
   [source generation-id]
-  (gc/generation-reachable-keys
-   (p/raw-storage source) (p/storage source) generation-id))
+  (let [[raw-store pss-storage] (source-store-and-storage source)]
+    (gc/generation-reachable-keys raw-store pss-storage generation-id)))
 
 (defn- unique-generation-mmap
   [mmap-dir generation-id]
@@ -218,15 +304,19 @@
 (defn open-generation
   "Open an exact immutable generation by id, never through a branch head.
 
-   `source` supplies the store and immutable index configuration.  Every open
-   receives a distinct mmap cache, so simultaneous historical views cannot
-   rewrite each other's local bytes."
+  `source` supplies the store and immutable index configuration.  Every open
+  receives a distinct mmap cache, so simultaneous historical views cannot
+  rewrite each other's local bytes."
   [source generation-id]
-  (let [mmap-dir (or (p/mmap-dir source)
+  (let [config? (generation-config? source)
+        idx (when-not config? (index-handle source))
+        raw-store (if config? (configured-store source) (p/raw-storage idx))
+        mmap-dir (or (when config? (:mmap-dir source))
+                     (when idx (p/mmap-dir idx))
                      (System/getProperty "java.io.tmpdir"))
         mmap-path (unique-generation-mmap mmap-dir generation-id)
         idx (writing/load-commit nil generation-id
-                                 :store (p/raw-storage source)
+                                 :store raw-store
                                  :mmap-path mmap-path)]
     (->GenerationView idx (p/current-commit idx) mmap-path (atom false))))
 
