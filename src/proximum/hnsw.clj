@@ -16,6 +16,7 @@
    - hnsw-search: k-NN search with SIMD distance"
   (:require [proximum.protocols :as p]
             [proximum.vectors :as vectors]
+            [proximum.validation :as validation]
             [proximum.storage :as storage]
             [proximum.edges :as edges]
             [proximum.metadata :as meta]
@@ -386,13 +387,31 @@
 ;; -----------------------------------------------------------------------------
 ;; Helper Functions
 
-(defn- ensure-float-array
-  "Convert to float array, always copying to avoid mutating user input.
-   This is defensive - we don't know what the user will do with their array after passing it."
-  ^floats [v]
-  (if (instance? (Class/forName "[F") v)
-    (aclone ^floats v)
-    (float-array v)))
+(defn- validate-float-array
+  "Validate exact dimension and finite float32 values before any mutation."
+  ^floats [v dimension distance-type]
+  (validation/validate-vector-for-metric
+   v dimension
+   (case distance-type
+     1 :cosine
+     2 :inner-product
+     :euclidean)))
+
+(defn- ensure-cosine-indexable!
+  [^floats vector distance-type operation]
+  (when (and (= distance-type 1) (validation/zero-vector? vector))
+    (throw (ex-info
+            (if (= operation :query)
+              "A zero vector has undefined cosine distance and cannot use ANN search"
+              "A zero vector is not indexable by a cosine ANN index")
+            {:reason (if (= operation :query)
+                       :cosine-zero-query
+                       :cosine-zero-vector-unindexable)
+             :metric :cosine
+             :operation operation
+             :pgvector-semantics (if (= operation :query)
+                                   :sql-distance-nan
+                                   :stored-but-not-ann-indexed)}))))
 
 (defn- node-level-for
   "Draw the HNSW level for a node.
@@ -557,7 +576,16 @@
          ^MemorySegment seg (vectors/get-segment vectors-store)
 
          float-vectors (into-array (map (fn [v]
-                                          (let [arr (ensure-float-array v)]
+                                          (let [arr (validate-float-array
+                                                     v dim
+                                                     (case distance-type
+                                                       :cosine 1
+                                                       :inner-product 2
+                                                       0))]
+                                            (ensure-cosine-indexable!
+                                             arr
+                                             (case distance-type :cosine 1 :inner-product 2 0)
+                                             :insert)
                                             (when use-cosine?
                                               (HnswInsert/normalizeVector arr))
                                             arr))
@@ -612,9 +640,8 @@
    (let [vectors-store (.-vectors index)
          ^MemorySegment seg (vectors/get-segment vectors-store)
          dim (.-dim index)
-         float-arr (if (instance? (Class/forName "[F") query)
-                     (aclone ^floats query)
-                     (float-array query))
+         float-arr (validate-float-array query dim (distance-type->int distance-type))
+         _ (ensure-cosine-indexable! float-arr (distance-type->int distance-type) :query)
          _ (when (= distance-type :cosine)
              (HnswSearch/normalizeVector float-arr))
          dist-int (int (distance-type->int distance-type))
@@ -652,7 +679,18 @@
                           :hint "Use (create-index {:type :hnsw :dim dim :capacity larger-value ...})"})))
        ;; Fork PES for immutable semantics - new PES is private to this operation
        (let [new-pes (.fork ^PersistentEdgeIndex pes-edges)
-             float-arr (ensure-float-array vector)
+             float-arr (validate-float-array vector dim distance-type)
+             _ (ensure-cosine-indexable! float-arr distance-type :insert)
+             external-id (meta/external-id-from-meta meta-map)
+             ;; Uniqueness must be checked before append!: VectorStore is an
+             ;; mmap-backed shared resource, so discovering the collision
+             ;; afterwards leaks a physical slot even though the logical index
+             ;; value is discarded.
+             _ (when (and external-id
+                          (some? (meta/lookup-external-id external-id-index external-id)))
+                 (throw (ex-info "External id already exists"
+                                 {:reason :duplicate-external-id
+                                  :external-id external-id})))
              _ (when use-cosine?
                  (HnswInsert/normalizeVector float-arr))
              node-id (vectors/append! vectors float-arr)
@@ -663,7 +701,6 @@
                                   dim (int node-level) (int ef-construction)
                                   distance-type)
              new-metadata (meta/set-metadata metadata node-id meta-map)
-             external-id (meta/external-id-from-meta meta-map)
              new-external-id-index (meta/set-external-id external-id-index external-id node-id)]
          (update-hnsw-index idx {:pes-edges new-pes
                                  :metadata new-metadata
@@ -681,7 +718,8 @@
            distance-type (.-distance-type idx)
            {:keys [metadata external-id-index M ef-construction ml max-levels seed]} state
            {:keys [parallelism] :or {parallelism (.availableProcessors (Runtime/getRuntime))}} opts
-           metadata-vec (:metadata opts)
+           vecs (vec vecs)
+           metadata-vec (when-let [xs (:metadata opts)] (vec xs))
            n (count vecs)
            cap (vectors/capacity vectors)
            cnt (vectors/count-vectors vectors)
@@ -693,9 +731,41 @@
                           :batch-size n
                           :needed (+ cnt n)
                           :hint "Use (create-index {:type :hnsw :dim dim :capacity larger-value ...})"})))
+       (when (and metadata-vec (not= n (count metadata-vec)))
+         (throw (ex-info "Vector and metadata counts must match"
+                         {:reason :batch-cardinality-mismatch
+                          :vector-count n
+                          :metadata-count (count metadata-vec)})))
        ;; Fork PES for immutable semantics - new PES is private to this operation
        (let [new-pes (.fork ^PersistentEdgeIndex pes-edges)
-             float-vecs (into-array (map ensure-float-array vecs))
+             ;; Realize and validate the entire batch before graph insertion or
+             ;; mmap append. A bad vector must not partially mutate storage.
+             float-vecs (into-array (map #(validate-float-array % dim distance-type) vecs))
+             _ (doseq [float-arr float-vecs]
+                 (ensure-cosine-indexable! float-arr distance-type :insert))
+             external-ids (when metadata-vec
+                            (mapv meta/external-id-from-meta metadata-vec))
+             duplicate-id (when external-ids
+                            (->> external-ids
+                                 (remove nil?)
+                                 frequencies
+                                 (some (fn [[external-id occurrences]]
+                                         (when (> occurrences 1) external-id)))))
+             _ (when duplicate-id
+                 (throw (ex-info "External id occurs more than once in batch"
+                                 {:reason :duplicate-external-id
+                                  :external-id duplicate-id})))
+             existing-id (when external-ids
+                           (some (fn [external-id]
+                                   (when (and external-id
+                                              (some? (meta/lookup-external-id
+                                                      external-id-index external-id)))
+                                     external-id))
+                                 external-ids))
+             _ (when existing-id
+                 (throw (ex-info "External id already exists"
+                                 {:reason :duplicate-external-id
+                                  :external-id existing-id})))
              _ (when use-cosine?
                  (HnswInsert/normalizeVectors float-vecs))
              node-ids (int-array (map (fn [v] (vectors/append! vectors v)) float-vecs))
@@ -734,7 +804,8 @@
            dim (.-dim idx)
            distance-type (.-distance-type idx)
            ef (max k (or (:ef opts) (:ef-search (.-state idx)) 50))
-           float-arr (ensure-float-array query)
+           float-arr (validate-float-array query dim distance-type)
+           _ (ensure-cosine-indexable! float-arr distance-type :query)
            _ (when (= distance-type 1)
                (HnswSearch/normalizeVector float-arr))
            ^MemorySegment seg (vectors/get-segment vectors)
@@ -756,7 +827,8 @@
            dim (.-dim idx)
            distance-type (.-distance-type idx)
            ef (or (:ef opts) (* k 10))
-           float-arr (ensure-float-array query)
+           float-arr (validate-float-array query dim distance-type)
+           _ (ensure-cosine-indexable! float-arr distance-type :query)
            _ (when (= distance-type 1)
                (HnswSearch/normalizeVector float-arr))
            ^MemorySegment seg (vectors/get-segment vectors)
