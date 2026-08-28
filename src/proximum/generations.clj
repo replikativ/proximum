@@ -24,6 +24,7 @@
             [proximum.vectors :as vectors]
             [proximum.writing :as writing])
   (:import [java.io File]
+           [java.lang.ref Cleaner Cleaner$Cleanable]
            [java.nio.file Files]
            [proximum.internal PersistentEdgeIndex]))
 
@@ -34,7 +35,50 @@
 (defrecord SealedGeneration
            [index generation-id mmap-path store-id guard-token status closed?])
 
-(defrecord GenerationView [index generation-id mmap-path closed?])
+(defrecord GenerationViewResource [index generation-id mmap-path refs closed?])
+
+(defrecord GenerationView
+           [index generation-id mmap-path resource cleanable* closed?])
+
+(defonce ^:private ^Cleaner generation-view-cleaner (Cleaner/create))
+
+(defn- release-view-resource! [^GenerationViewResource resource]
+  (locking resource
+    (when-not @(:closed? resource)
+      (if (> (long @(:refs resource)) 1)
+        (swap! (:refs resource) dec)
+        (try
+          (let [result (a/<!! (p/close! (:index resource)))]
+            (when (instance? Throwable result)
+              (throw result))
+            (Files/deleteIfExists (.toPath (File. ^String (:mmap-path resource)))))
+          (finally
+            ;; Native close is not safely retryable after partial progress.
+            ;; A failed close may leave the disposable cache file behind, but
+            ;; no later lease may reuse the handle.
+            (reset! (:closed? resource) true)))))))
+
+(defrecord GenerationViewCleanup [resource closed?]
+  Runnable
+  (run [_]
+    (when (compare-and-set! closed? false true)
+      (try
+        (release-view-resource! resource)
+        ;; Cleaner has no caller to receive a native close failure.
+        (catch Throwable _)))))
+
+(defn- generation-view-lease [^GenerationViewResource resource]
+  (let [cleanable* (atom nil)
+        closed? (atom false)
+        view (->GenerationView (:index resource) (:generation-id resource)
+                               (:mmap-path resource) resource cleanable* closed?)
+        cleanup (->GenerationViewCleanup resource closed?)]
+    (try
+      (reset! cleanable* (.register generation-view-cleaner view cleanup))
+      view
+      (catch Throwable failure
+        (release-view-resource! resource)
+        (throw failure)))))
 
 (defn- ensure-status!
   [status expected operation]
@@ -364,8 +408,9 @@
   "Open an exact immutable generation by id, never through a branch head.
 
   `source` supplies the store and immutable index configuration.  Every open
-  receives a distinct mmap cache, so simultaneous historical views cannot
-  rewrite each other's local bytes."
+  receives a distinct mmap cache, so unrelated historical views cannot rewrite
+  each other's local bytes. `retain-generation-view` creates another logical
+  owner of one already-open read handle without copying that cache."
   [source generation-id]
   (let [config? (generation-config? source)
         idx (when-not config? (index-handle source))
@@ -377,8 +422,28 @@
         idx (writing/load-commit nil generation-id
                                  :store raw-store
                                  :mmap-dir mmap-dir
-                                 :mmap-path mmap-path)]
-    (->GenerationView idx (p/current-commit idx) mmap-path (atom false))))
+                                 :mmap-path mmap-path)
+        resource (->GenerationViewResource idx (p/current-commit idx) mmap-path
+                                           (atom 1) (atom false))]
+    (generation-view-lease resource)))
+
+(defn retain-generation-view
+  "Return an independently closeable lease on an existing immutable view.
+
+  This is for immutable wrapper transitions such as Datahike preparation: two
+  DB values may own the same exact native query handle, but closing either must
+  not unmap it underneath the other. Independent `open-generation` calls still
+  receive private mmap caches, because the raw Proximum index API can derive
+  mutable descendants and sharing those local bytes broadly would be unsafe."
+  [^GenerationView view]
+  (let [resource (:resource view)]
+    (locking resource
+      (when (or @(:closed? view) @(:closed? resource))
+        (throw (ex-info "Cannot retain a closed generation view"
+                        {:reason :generation-view-closed
+                         :generation-id (:generation-id view)})))
+      (swap! (:refs resource) inc))
+    (generation-view-lease resource)))
 
 (defn close-view!
   "Close a generation/view and delete its private mmap cache.
@@ -394,11 +459,24 @@
       (throw (ex-info "Cannot close an unrooted generation; call rooted! or discard!"
                       {:reason :generation-unrooted
                        :generation-id (:generation-id generation)})))
-    (if (compare-and-set! closed? false true)
+    (cond
+      (instance? GenerationView generation)
+      (if (compare-and-set! closed? false true)
+        (a/thread
+          (try
+            (release-view-resource! (:resource generation))
+            (finally
+              (.clean ^Cleaner$Cleanable @(:cleanable* generation))))
+          nil)
+        (doto (a/chan) a/close!))
+
+      (compare-and-set! closed? false true)
       (a/go
         (a/<! (p/close! idx))
         (Files/deleteIfExists (.toPath (File. ^String mmap-path)))
         nil)
+
+      :else
       (doto (a/chan) a/close!))))
 
 (defn discard!

@@ -243,6 +243,46 @@
         (a/<!! (p/close! source))
         (delete-tree! dir)))))
 
+(deftest retained-generation-views-have-independent-lifetimes
+  (let [dir (temp-dir)
+        source (source-index dir)
+        builder (generations/begin-generation source)
+        sealed* (atom nil)
+        view* (atom nil)
+        retained* (atom nil)]
+    (try
+      (generations/put! builder :new (float-array [1.0 0.0]))
+      (let [sealed (generations/seal! builder)
+            _ (reset! sealed* sealed)
+            generation-id (generations/generation-id sealed)
+            view (generations/open-generation source generation-id)
+            _ (reset! view* view)
+            retained (generations/retain-generation-view view)
+            _ (reset! retained* retained)
+            mmap-path (:mmap-path view)]
+        (generations/rooted! sealed)
+        (is (identical? (:index view) (:index retained)))
+        (is (= mmap-path (:mmap-path retained)))
+        (a/<!! (generations/close-view! view))
+        (a/<!! (generations/close-view! view))
+        (is (.exists (io/file mmap-path))
+            "one logical close cannot delete another DB value's mmap")
+        (is (= [1.0 0.0]
+               (vec (core/get-vector (generations/generation-index retained)
+                                     :new))))
+        (a/<!! (generations/close-view! retained))
+        (is (not (.exists (io/file mmap-path)))
+            "the last lease closes the native handle and removes its cache"))
+      (finally
+        (when (and @retained* (not @(:closed? @retained*)))
+          (a/<!! (generations/close-view! @retained*)))
+        (when (and @view* (not @(:closed? @view*)))
+          (a/<!! (generations/close-view! @view*)))
+        (when @sealed*
+          (a/<!! (generations/close-view! @sealed*)))
+        (a/<!! (p/close! source))
+        (delete-tree! dir)))))
+
 (deftest seal-failure-never-publishes-or-mutates-source
   (let [dir (temp-dir)
         source (source-index dir)
