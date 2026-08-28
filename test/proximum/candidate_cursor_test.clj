@@ -88,3 +88,22 @@
                        {:primary-snapshot-id :snapshot}))))
       (finally
         (a/<!! (core/close! base))))))
+
+(deftest candidate-beam-preserves-index-default-test
+  (let [idx (test-index)
+        calls (atom [])
+        query (float-array [0.0 0.0])]
+    (try
+      (with-redefs [p/search (fn [_idx _query _k options]
+                               (swap! calls conj options)
+                               [])]
+        (core/start-candidate-scan
+         idx query {:candidate-limit 6 :primary-snapshot-id :snapshot})
+        (core/start-candidate-scan
+         idx query {:candidate-limit 6 :ef 30 :primary-snapshot-id :snapshot})
+        (core/start-candidate-scan
+         idx query {:candidate-limit 6 :ef 2 :primary-snapshot-id :snapshot}))
+      (is (= [{} {:ef 30} {:ef 6}] @calls)
+          "an omitted :ef delegates to the index generation's beam")
+      (finally
+        (a/<!! (core/close! idx))))))

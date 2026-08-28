@@ -21,7 +21,9 @@
    Options:
      :candidate-limit maximum candidates captured once (default 100)
      :page-size       candidates returned per page (default 25)
-     :ef              HNSW beam width (at least candidate-limit)
+     :ef              optional HNSW beam override (at least candidate-limit);
+                      omitted uses the index generation's configured/default
+                      beam instead of weakening it to the candidate count
      :expected-index-commit-id fail if the index is not at this durable commit
      :primary-snapshot-id      opaque owner snapshot identity; required when
                                the index itself has no durable commit
@@ -60,8 +62,9 @@
                                    :primary-snapshot-id primary-snapshot-id
                                    :metric metric
                                    :query (vec query)}))
-         results (p/search idx query candidate-limit
-                           {:ef (max candidate-limit (or ef candidate-limit))})
+         search-options (cond-> {}
+                          ef (assoc :ef (max candidate-limit ef)))
+         results (p/search idx query candidate-limit search-options)
          candidates (->> results
                          (map (fn [{:keys [id distance]}]
                                 (let [external-id (external-id idx id)]
