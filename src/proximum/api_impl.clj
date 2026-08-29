@@ -32,6 +32,17 @@
   (when-let [m (p/get-metadata idx internal-id)]
     (:external-id m)))
 
+(defn- external-ids->internal-filter
+  "Translate external ids directly into Proximum's native internal-id bitset.
+   Avoiding an intermediate boxed Clojure set materially reduces allocation
+   for database-produced bitmap filters."
+  [idx external-ids]
+  (let [^ArrayBitSet bitset (ArrayBitSet. (int (p/count-vectors idx)))]
+    (doseq [external-id external-ids]
+      (when-let [internal-id (lookup-internal-id idx external-id)]
+        (.add bitset (int internal-id))))
+    bitset))
+
 (defn- ensure-id
   "Ensure we have an ID - generate UUID if nil."
   [id]
@@ -100,10 +111,12 @@
    (let [;; Build internal filter from external filter
          internal-filter
          (cond
-           ;; Set of external IDs -> translate to internal IDs
-           (set? filter-pred)
-           (let [internal-ids (keep #(lookup-internal-id idx %) filter-pred)]
-             (set internal-ids))
+           ;; Database bitmaps and other Iterable collections translate
+           ;; directly to the native dense internal-id bitset. Sequential?
+           ;; retains lazy Clojure sequences that are not Iterable.
+           (or (instance? java.lang.Iterable filter-pred)
+               (sequential? filter-pred))
+           (external-ids->internal-filter idx filter-pred)
 
            ;; Predicate function - wrap to translate IDs
            (fn? filter-pred)
@@ -111,7 +124,7 @@
              (let [external-id (get-external-id idx internal-id)]
                (filter-pred external-id metadata)))
 
-           ;; ArrayBitSet or other - pass through (advanced use)
+           ;; ArrayBitSet or other native filters pass through (advanced use)
            :else filter-pred)
 
          results (p/search-filtered idx query k internal-filter (or opts {}))]

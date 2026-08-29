@@ -395,10 +395,10 @@ Example:
     {:args [:=> [:cat VectorIndex Vector pos-int? :any [:? SearchOptions]]
             [:sequential SearchResult]]
      :ret  [:sequential SearchResult]
-     :doc  "Search with filtering predicate or ID set.
+     :doc  "Search with filtering predicate or iterable ID collection.
 Filter can be:
   - (fn [id metadata] boolean) - predicate receives external ID
-  - Set of allowed external IDs
+  - Iterable collection of allowed external IDs
 
 Example:
   (search-filtered idx query 10 #{\"doc-1\" \"doc-2\"})"

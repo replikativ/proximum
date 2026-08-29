@@ -551,9 +551,28 @@
 
           (a/<!! (core/close! idx2))))
 
+      (testing "iterable filters preserve 64-bit external IDs without a boxed set"
+        (let [high-id (inc (bit-shift-left 1 32))
+              target (random-vec 32)
+              idx (create-test-index {:type :hnsw
+                                      :dim 32
+                                      :M 8
+                                      :ef-construction 50
+                                      :vectors-path (str path "-iterable")
+                                      :capacity 100})
+              idx (core/insert idx (random-vec 32) 1)
+              idx (core/insert idx target high-id)
+              ;; A lazy sequence is the shape Datahike exposes over its
+              ;; Roaring64 entity filter.
+              allowed (map identity [high-id])
+              results (core/search-filtered idx target 1 allowed {:ef 50})]
+          (is (= [high-id] (mapv :id results)))
+          (a/<!! (core/close! idx))))
+
       (finally
         (cleanup path)
-        (cleanup (str path "-set"))))))
+        (cleanup (str path "-set"))
+        (cleanup (str path "-iterable"))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Fork performance tests
