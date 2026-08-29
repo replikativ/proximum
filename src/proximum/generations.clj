@@ -32,13 +32,17 @@
            [index-atom source-generation workspace-id mmap-path
             store-id guard-token status closed?])
 
-(defrecord SealedGeneration
-           [index generation-id mmap-path store-id guard-token status closed?])
+(defrecord GenerationPublicationHold
+           [generation-id store-id guard-token status completed?])
 
-(defrecord GenerationViewResource [index generation-id mmap-path refs closed?])
+(defrecord SealedGeneration
+           [index generation-id mmap-path store-id guard-token status closed?
+            hold-transferred?])
+
+(defrecord GenerationViewResource [index generation-id mmap-path store-id refs closed?])
 
 (defrecord GenerationView
-           [index generation-id mmap-path resource cleanable* closed?])
+           [index generation-id mmap-path store-id resource cleanable* closed?])
 
 (defonce ^:private ^Cleaner generation-view-cleaner (Cleaner/create))
 
@@ -71,7 +75,8 @@
   (let [cleanable* (atom nil)
         closed? (atom false)
         view (->GenerationView (:index resource) (:generation-id resource)
-                               (:mmap-path resource) resource cleanable* closed?)
+                               (:mmap-path resource) (:store-id resource)
+                               resource cleanable* closed?)
         cleanup (->GenerationViewCleanup resource closed?)]
     (try
       (reset! cleanable* (.register generation-view-cleaner view cleanup))
@@ -310,6 +315,18 @@
      (swap! (:index-atom builder) api/insert vector id metadata)
      builder)))
 
+(defn put-batch!
+  "Insert one validated batch into a private builder with a single persistent
+   HNSW fork. `vectors` and `ids` follow `proximum.core/insert-batch`; optional
+   opts include `:metadata` and `:parallelism`."
+  ([builder vectors ids]
+   (put-batch! builder vectors ids nil))
+  ([^GenerationBuilder builder vectors ids opts]
+   (locking builder
+     (ensure-status! (:status builder) :open "put-batch!")
+     (swap! (:index-atom builder) api/insert-batch vectors ids opts)
+     builder)))
+
 (defn delete!
   "Delete `id` from a private builder and return the same builder."
   [^GenerationBuilder builder id]
@@ -355,7 +372,7 @@
               (->SealedGeneration
                result (p/current-commit result) (:mmap-path builder)
                (:store-id builder) (:guard-token builder) (:status builder)
-               (:closed? builder))))))
+               (:closed? builder) (atom false))))))
       (catch Throwable e
         (when (= :sealing @(:status builder))
           (reset! (:status builder) :failed))
@@ -369,7 +386,11 @@
    prepare the same immutable generation for overlapping commit attempts; each
    successful attempt is allowed to acknowledge the generation it published."
   [^SealedGeneration generation]
-  (locking (:status generation)
+  (locking generation
+    (when @(:hold-transferred? generation)
+      (throw (ex-info "The generation publication hold belongs to another owner"
+                      {:reason :generation-publication-hold-transferred
+                       :generation-id (:generation-id generation)})))
     (case @(:status generation)
       :sealed-unrooted
       (do
@@ -384,8 +405,89 @@
 (defn generation-id [generation]
   (:generation-id generation))
 
+(defn generation-store-id
+  "Return the canonical identity of the live Konserve generation store."
+  [generation]
+  (:store-id generation))
+
 (defn generation-index [generation]
   (:index generation))
+
+(defn take-publication-hold!
+  "Detach the lightweight GC publication hold from a sealed generation.
+
+   The hold can outlive the native index/mmap and can be carried across a chain
+   of unpublished child generations without retaining every graph in memory.
+   Complete it with `root-publication!` after the owner root lands or
+   `abort-publication!` after publication is definitively known not to land.
+   An ambiguous publication must retain the hold."
+  [^SealedGeneration generation]
+  (locking generation
+    (ensure-status! (:status generation) :sealed-unrooted
+                    "take-publication-hold!")
+    (when-not (compare-and-set! (:hold-transferred? generation) false true)
+      (throw (ex-info "The generation publication hold was already transferred"
+                      {:reason :generation-publication-hold-transferred
+                       :generation-id (:generation-id generation)})))
+    (->GenerationPublicationHold
+     (:generation-id generation) (:store-id generation)
+     (:guard-token generation) (:status generation) (atom false))))
+
+(defn root-publication!
+  "Release a transferred hold after an owner durably publishes its generation."
+  [^GenerationPublicationHold hold]
+  (locking hold
+    (when-not @(:completed? hold)
+      (ensure-status! (:status hold) :sealed-unrooted "root-publication!")
+      (guard/done! (:store-id hold) (:guard-token hold))
+      (reset! (:status hold) :rooted)
+      (reset! (:completed? hold) true)))
+  hold)
+
+(defn abort-publication!
+  "Release a transferred hold after publication is definitively aborted."
+  [^GenerationPublicationHold hold]
+  (locking hold
+    (when-not @(:completed? hold)
+      (ensure-status! (:status hold) :sealed-unrooted "abort-publication!")
+      (guard/done! (:store-id hold) (:guard-token hold))
+      (reset! (:status hold) :discarded)
+      (reset! (:completed? hold) true)))
+  hold)
+
+(defn take-generation-view!
+  "Transfer a sealed generation's live native handle into an immutable view.
+
+   This avoids closing and immediately restoring the generation after its
+   commit has already been sealed.  The returned view becomes the sole owner
+   of the mmap and native index handle; the sealed value retains only the GC
+   guard acknowledgement lifecycle used by `rooted!` and `discard!`.
+
+   Ownership transfer is one-shot.  On an aborted publication the caller must
+   both `discard!` the sealed value (to release its guard) and `close-view!`
+   the returned view (to release the transferred native resources)."
+  [^SealedGeneration generation]
+  (let [status (:status generation)
+        closed? (:closed? generation)]
+    (locking generation
+      (when-not (#{:sealed-unrooted :rooted} @status)
+        (throw (ex-info "Only a sealed generation can transfer its query view"
+                        {:reason :invalid-generation-status
+                         :operation "take-generation-view!"
+                         :expected #{:sealed-unrooted :rooted}
+                         :actual @status})))
+      ;; The sealed value used to own this handle directly. Mark that ownership
+      ;; closed before exposing the view, so close/discard on the guard handle
+      ;; cannot unmap storage underneath its new owner.
+      (when-not (compare-and-set! closed? false true)
+        (throw (ex-info "The sealed generation's query view was already transferred or closed"
+                        {:reason :generation-view-already-transferred
+                         :generation-id (:generation-id generation)})))
+      (let [resource (->GenerationViewResource
+                      (:index generation) (:generation-id generation)
+                      (:mmap-path generation) (:store-id generation)
+                      (atom 1) (atom false))]
+        (generation-view-lease resource)))))
 
 (defn- index-handle [source]
   (cond
@@ -450,6 +552,7 @@
                                  :mmap-dir mmap-dir
                                  :mmap-path mmap-path)
         resource (->GenerationViewResource idx (p/current-commit idx) mmap-path
+                                           (kp/store-id raw-store)
                                            (atom 1) (atom false))]
     (generation-view-lease resource)))
 
@@ -481,7 +584,8 @@
         mmap-path (:mmap-path generation)
         closed? (:closed? generation)]
     (when (and (instance? SealedGeneration generation)
-               (= :sealed-unrooted @(:status generation)))
+               (= :sealed-unrooted @(:status generation))
+               (not @(:hold-transferred? generation)))
       (throw (ex-info "Cannot close an unrooted generation; call rooted! or discard!"
                       {:reason :generation-unrooted
                        :generation-id (:generation-id generation)})))
@@ -510,18 +614,21 @@
 
    Immutable objects already written remain harmless garbage for the next GC."
   [generation]
-  (let [status (:status generation)
-        current @status
-        idx (if (instance? GenerationBuilder generation)
-              @(:index-atom generation)
-              (:index generation))
-        closed? (:closed? generation)]
-    (when-not (#{:discarded :rooted} current)
-      (guard/done! (:store-id generation) (:guard-token generation))
-      (reset! status :discarded))
-    (if (compare-and-set! closed? false true)
-      (a/go
-        (a/<! (p/close! idx))
-        (Files/deleteIfExists (.toPath (File. ^String (:mmap-path generation))))
-        nil)
-      (doto (a/chan) a/close!))))
+  (locking generation
+    (let [status (:status generation)
+          current @status
+          idx (if (instance? GenerationBuilder generation)
+                @(:index-atom generation)
+                (:index generation))
+          closed? (:closed? generation)]
+      (when (and (not (#{:discarded :rooted} current))
+                 (or (instance? GenerationBuilder generation)
+                     (not @(:hold-transferred? generation))))
+        (guard/done! (:store-id generation) (:guard-token generation))
+        (reset! status :discarded))
+      (if (compare-and-set! closed? false true)
+        (a/go
+          (a/<! (p/close! idx))
+          (Files/deleteIfExists (.toPath (File. ^String (:mmap-path generation))))
+          nil)
+        (doto (a/chan) a/close!)))))

@@ -313,6 +313,141 @@
         (a/<!! (p/close! source))
         (delete-tree! dir)))))
 
+(deftest sealed-generation-can-transfer-its-live-query-view
+  (let [dir (temp-dir)
+        source (source-index dir)
+        builder (generations/begin-generation source)
+        sealed* (atom nil)
+        view* (atom nil)]
+    (try
+      (generations/put! builder :new (float-array [1.0 0.0]))
+      (let [sealed (generations/seal! builder)
+            _ (reset! sealed* sealed)
+            view (generations/take-generation-view! sealed)
+            _ (reset! view* view)
+            mmap-path (:mmap-path sealed)]
+        (is (identical? (generations/generation-index sealed)
+                        (generations/generation-index view)))
+        (is (= mmap-path (:mmap-path view)))
+        (is (= :generation-view-already-transferred
+               (:reason
+                (ex-data
+                 (try
+                   (generations/take-generation-view! sealed)
+                   nil
+                   (catch clojure.lang.ExceptionInfo failure failure))))))
+
+        ;; The sealed value now owns only guard acknowledgement. Closing it
+        ;; after publication cannot invalidate the transferred query handle.
+        (generations/rooted! sealed)
+        (a/<!! (generations/close-view! sealed))
+        (is (= [1.0 0.0]
+               (vec (core/get-vector (generations/generation-index view)
+                                     :new))))
+        (is (.exists (io/file mmap-path)))
+
+        (a/<!! (generations/close-view! view))
+        (is (not (.exists (io/file mmap-path)))))
+      (finally
+        (when (and @sealed* (= :sealed-unrooted @(:status @sealed*)))
+          (generations/discard! @sealed*))
+        (when (and @view* (not @(:closed? @view*)))
+          (a/<!! (generations/close-view! @view*)))
+        (a/<!! (p/close! source))
+        (delete-tree! dir)))))
+
+(deftest aborted-transferred-generation-separates-guard-and-view-cleanup
+  (let [dir (temp-dir)
+        source (source-index dir)
+        store-id (kp/store-id (p/raw-storage source))
+        builder (generations/begin-generation source)
+        sealed* (atom nil)
+        view* (atom nil)]
+    (try
+      (generations/put! builder :new (float-array [1.0 0.0]))
+      (let [sealed (generations/seal! builder)
+            _ (reset! sealed* sealed)
+            view (generations/take-generation-view! sealed)
+            _ (reset! view* view)
+            mmap-path (:mmap-path view)]
+        (is (guard/in-flight? store-id))
+        (a/<!! (generations/discard! sealed))
+        (is (not (guard/in-flight? store-id)))
+        (is (.exists (io/file mmap-path))
+            "discard releases the guard but not transferred ownership")
+        (is (= [1.0 0.0]
+               (vec (core/get-vector (generations/generation-index view)
+                                     :new))))
+        (a/<!! (generations/close-view! view))
+        (is (not (.exists (io/file mmap-path)))))
+      (finally
+        (when (and @sealed* (= :sealed-unrooted @(:status @sealed*)))
+          (generations/discard! @sealed*))
+        (when (and @view* (not @(:closed? @view*)))
+          (a/<!! (generations/close-view! @view*)))
+        (a/<!! (p/close! source))
+        (delete-tree! dir)))))
+
+(deftest publication-hold-does-not-retain-the-native-generation
+  (let [dir (temp-dir)
+        source (source-index dir)
+        store-id (kp/store-id (p/raw-storage source))
+        builder (generations/begin-generation source)
+        view* (atom nil)
+        hold* (atom nil)]
+    (try
+      (generations/put! builder :new (float-array [1.0 0.0]))
+      (let [sealed (generations/seal! builder)
+            view (generations/take-generation-view! sealed)
+            _ (reset! view* view)
+            hold (generations/take-publication-hold! sealed)
+            _ (reset! hold* hold)]
+        (is (= (generations/generation-id sealed) (:generation-id hold)))
+        (is (nil? (:index hold)))
+        (is (nil? (:mmap-path hold)))
+        (is (guard/in-flight? store-id))
+        (is (= :generation-publication-hold-transferred
+               (:reason
+                (ex-data
+                 (try
+                   (generations/take-publication-hold! sealed)
+                   nil
+                   (catch clojure.lang.ExceptionInfo failure failure))))))
+        (a/<!! (generations/close-view! sealed))
+        (is (guard/in-flight? store-id)
+            "ordinary sealed-handle cleanup does not complete its transferred hold")
+        (let [original-done guard/done!
+              attempts (atom 0)
+              failure (ex-info "injected durable completion failure"
+                               {:reason :injected-completion-failure})]
+          (is (identical?
+               failure
+               (try
+                 (with-redefs [guard/done!
+                               (fn [sid token]
+                                 (if (= 1 (swap! attempts inc))
+                                   (throw failure)
+                                   (original-done sid token)))]
+                   (generations/root-publication! hold))
+                 nil
+                 (catch Throwable thrown thrown))))
+          (is (false? @(:completed? hold)))
+          (is (guard/in-flight? store-id))
+          (with-redefs [guard/done! original-done]
+            (generations/root-publication! hold)))
+        (generations/root-publication! hold)
+        (is (not (guard/in-flight? store-id)))
+        (is (= [1.0 0.0]
+               (vec (core/get-vector (generations/generation-index view)
+                                     :new)))))
+      (finally
+        (when (and @hold* (not @(:completed? @hold*)))
+          (generations/abort-publication! @hold*))
+        (when (and @view* (not @(:closed? @view*)))
+          (a/<!! (generations/close-view! @view*)))
+        (a/<!! (p/close! source))
+        (delete-tree! dir)))))
+
 (deftest seal-failure-never-publishes-or-mutates-source
   (let [dir (temp-dir)
         source (source-index dir)
@@ -338,6 +473,38 @@
       (finally
         (a/<!! (generations/discard! builder))
         (is (not (guard/in-flight? store-id)))
+        (a/<!! (p/close! source))
+        (delete-tree! dir)))))
+
+(deftest generation-builder-batch-insertion-is-atomic
+  (let [dir (temp-dir)
+        source (source-index dir)
+        builder (generations/begin-generation source)]
+    (try
+      (generations/put-batch!
+       builder
+       [(float-array [1.0 0.0]) (float-array [2.0 0.0])]
+       [:one :two]
+       {:parallelism 2})
+      (is (= [1.0 0.0]
+             (vec (core/get-vector (generations/builder-index builder) :one))))
+      (is (= [2.0 0.0]
+             (vec (core/get-vector (generations/builder-index builder) :two))))
+      (let [before (core/count-vectors (generations/builder-index builder))]
+        (is (= :dimension-mismatch
+               (try
+                 (generations/put-batch!
+                  builder
+                  [(float-array [3.0 0.0]) (float-array [4.0])]
+                  [:three :invalid])
+                 nil
+                 (catch clojure.lang.ExceptionInfo failure
+                   (:reason (ex-data failure))))))
+        (is (= before
+               (core/count-vectors (generations/builder-index builder)))
+            "a malformed later vector prevents the entire batch from appending"))
+      (finally
+        (a/<!! (generations/discard! builder))
         (a/<!! (p/close! source))
         (delete-tree! dir)))))
 
