@@ -6,9 +6,10 @@
    retains the native visited/discarded frontier, allowing later pages to
    discover more candidates after primary-store rejection."
   (:require [hasch.core :as hasch]
+            [proximum.metadata :as meta]
             [proximum.pgvector :as pg]
             [proximum.protocols :as p])
-  (:import [proximum.internal HnswCandidateCursor]))
+  (:import [proximum.internal ArrayBitSet HnswCandidateCursor]))
 
 (defrecord CandidateScan [candidates offset page-size metadata])
 (defrecord IterativeCandidateScan [cursor idx page-size page-number metadata])
@@ -17,6 +18,39 @@
 
 (defn- external-id [idx internal-id]
   (:external-id (p/get-metadata idx internal-id)))
+
+(defn- internal-entity-filter
+  "Translate the public external-id filter into the native generation-local
+   node-id bitset once. The cursor clones this bitset, so later mutation of an
+   advanced caller's ArrayBitSet cannot change a continuation's universe."
+  [idx entity-filter]
+  (when (some? entity-filter)
+    (cond
+      (instance? ArrayBitSet entity-filter)
+      entity-filter
+
+      (or (instance? java.lang.Iterable entity-filter)
+          (sequential? entity-filter))
+      (let [^ArrayBitSet bitset (ArrayBitSet. (int (p/vector-count-total idx)))
+            external-id-index (p/external-id-index idx)]
+        (doseq [id entity-filter]
+          (when-let [internal-id (meta/lookup-external-id external-id-index id)]
+            (.add bitset (int internal-id))))
+        bitset)
+
+      (fn? entity-filter)
+      (let [total (int (p/vector-count-total idx))
+            ^ArrayBitSet bitset (ArrayBitSet. total)]
+        (dotimes [internal-id total]
+          (let [metadata (p/get-metadata idx internal-id)]
+            (when (entity-filter (:external-id metadata) metadata)
+              (.add bitset internal-id))))
+        bitset)
+
+      :else
+      (throw (ex-info ":entity-filter must be an Iterable of external ids, a predicate, or ArrayBitSet"
+                      {:reason :invalid-entity-filter
+                       :type (type entity-filter)})))))
 
 (defn start-candidate-scan
   "Materialize an approximate candidate set and return an immutable cursor.
@@ -32,6 +66,9 @@
                                the index itself has no durable commit
      :query-id        stable caller identity; defaults to a content hash
      :mode            :materialized (default) or :iterative
+     :entity-filter   allowed external IDs (Iterable), a predicate receiving
+                      [external-id metadata], or an internal ArrayBitSet;
+                      filtering defines the logical universe before LIMIT
      :strict-order?   iterative pages never regress in distance (default true)
      :max-visited     optional traversal budget; 0/unset means unlimited
      :max-distance-computations optional distance budget
@@ -45,7 +82,7 @@
    :approximate because HNSW may not discover every true neighbor."
   ([idx query] (start-candidate-scan idx query {}))
   ([idx query {:keys [candidate-limit page-size ef expected-index-commit-id
-                      primary-snapshot-id query-id mode strict-order?
+                      primary-snapshot-id query-id mode entity-filter strict-order?
                       max-visited max-distance-computations timeout-ms
                       max-frontier-nodes]
                :or {candidate-limit 100 page-size 25 mode :materialized}}]
@@ -55,7 +92,8 @@
    (when-not (pos-int? page-size)
      (throw (ex-info ":page-size must be positive"
                      {:reason :invalid-page-size :value page-size})))
-   (let [config (p/index-config idx)
+   (let [internal-filter (internal-entity-filter idx entity-filter)
+         config (p/index-config idx)
          metric (:distance config)
          index-commit-id (p/current-commit idx)
          _ (when (and expected-index-commit-id
@@ -82,13 +120,19 @@
                         :complete-recall? false
                         :commit-id (p/current-commit idx)
                         :vector-count (p/vector-count-total idx)
+                        :entity-filtered? (some? internal-filter)
+                        :entity-filter-cardinality
+                        (some-> ^ArrayBitSet internal-filter .cardinality)
                         :mutation-stable? true
                         :exhaustive? false}]
      (case mode
        :materialized
        (let [search-options (cond-> {}
                               ef (assoc :ef (max candidate-limit ef)))
-             results (p/search idx query candidate-limit search-options)
+             results (if internal-filter
+                       (p/search-filtered idx query candidate-limit
+                                          internal-filter search-options)
+                       (p/search idx query candidate-limit search-options))
              candidates (->> results
                              (map #(candidate idx metric index-commit-id
                                               primary-snapshot-id %))
@@ -119,7 +163,9 @@
                                 max-distance-computations)
                          timeout-ms (assoc :timeout-ms timeout-ms)
                          max-frontier-nodes
-                         (assoc :max-frontier-nodes max-frontier-nodes)))]
+                         (assoc :max-frontier-nodes max-frontier-nodes)
+                         internal-filter
+                         (assoc :entity-filter internal-filter)))]
            (->IterativeCandidateScan
             cursor idx page-size 0
             (assoc base-metadata

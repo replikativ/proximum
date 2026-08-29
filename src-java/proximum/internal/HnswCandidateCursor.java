@@ -43,6 +43,7 @@ public final class HnswCandidateCursor implements AutoCloseable {
     private final long maxDistanceComputations;
     private final long timeoutNanos;
     private final long maxFrontierNodes;
+    private final ArrayBitSet allowedIds;
     private final Runnable leaseRelease;
     private final long[] visited;
     private final long[] discardedMembership;
@@ -78,6 +79,7 @@ public final class HnswCandidateCursor implements AutoCloseable {
             long maxDistanceComputations,
             long timeoutNanos,
             long maxFrontierNodes,
+            ArrayBitSet allowedIds,
             Runnable leaseRelease) {
         if (ef <= 0) {
             throw new IllegalArgumentException("ef must be positive");
@@ -93,6 +95,9 @@ public final class HnswCandidateCursor implements AutoCloseable {
         this.maxDistanceComputations = maxDistanceComputations;
         this.timeoutNanos = timeoutNanos;
         this.maxFrontierNodes = maxFrontierNodes;
+        // A continuation's logical universe is part of its pinned snapshot.
+        // Do not allow mutation of an advanced caller's bitset to change it.
+        this.allowedIds = allowedIds == null ? null : allowedIds.clone();
         this.leaseRelease = leaseRelease;
 
         int words = Math.max(1, (nodeCount + 63) / 64);
@@ -236,7 +241,8 @@ public final class HnswCandidateCursor implements AutoCloseable {
         PriorityQueue<Node> results = new PriorityQueue<>(FURTHEST_FIRST);
         candidates.addAll(seeds);
         for (Node seed : seeds) {
-            if (!edges.isDeleted(seed.id) && !isSet(emitted, seed.id)) {
+            if (isAllowed(seed.id)
+                    && !edges.isDeleted(seed.id) && !isSet(emitted, seed.id)) {
                 results.add(seed);
             }
         }
@@ -293,7 +299,8 @@ public final class HnswCandidateCursor implements AutoCloseable {
                         || NEAREST_FIRST.compare(neighbor, furthest) < 0;
                 if (competitive) {
                     candidates.add(neighbor);
-                    if (!edges.isDeleted(neighborId) && !isSet(emitted, neighborId)) {
+                    if (isAllowed(neighborId)
+                            && !edges.isDeleted(neighborId) && !isSet(emitted, neighborId)) {
                         results.add(neighbor);
                         if (results.size() > beamWidth) {
                             addDiscarded(results.poll());
@@ -399,6 +406,10 @@ public final class HnswCandidateCursor implements AutoCloseable {
             clear(discardedMembership, node.id);
         }
         return discarded.isEmpty();
+    }
+
+    private boolean isAllowed(int id) {
+        return allowedIds == null || allowedIds.contains(id);
     }
 
     private void markVisited(int id) {

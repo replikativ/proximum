@@ -946,6 +946,7 @@
                                 (* 1000000 timeout-ms)
                                 0))
           max-frontier-nodes (long (or (:max-frontier-nodes opts) 100000))
+          ^ArrayBitSet entity-filter (:entity-filter opts)
           _ (doseq [[option value]
                     [[:max-visited max-visited]
                      [:max-distance-computations max-distance-computations]
@@ -968,7 +969,7 @@
                               distance-type strict-order?
                               (int (vectors/count-vectors vectors))
                               max-visited max-distance-computations
-                              timeout-nanos max-frontier-nodes lease)
+                              timeout-nanos max-frontier-nodes entity-filter lease)
         (catch Throwable failure
           (.run ^Runnable lease)
           (throw failure))))))

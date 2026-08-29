@@ -2,7 +2,8 @@
   (:require [clojure.core.async :as a]
             [clojure.test :refer [deftest is]]
             [proximum.core :as core]
-            [proximum.protocols :as p]))
+            [proximum.protocols :as p])
+  (:import [proximum.internal ArrayBitSet]))
 
 (defn- test-index []
   (core/create-index {:type :hnsw
@@ -64,6 +65,61 @@
                     (mapcat :candidates [page-1 page-2 page-3])))
         (is (not-any? #(= :later (:id %))
                       (mapcat :candidates [page-1 page-2 page-3]))))
+      (finally
+        (a/<!! (core/close! idx))))))
+
+(deftest entity-filter-defines-candidate-page-universe-test
+  (let [base (test-index)
+        idx (reduce (fn [i n]
+                      (core/insert i (float-array [(float n) 0.0]) n))
+                    base
+                    (range 20))
+        allowed #{5 6 7}]
+    (try
+      (let [materialized
+            (core/candidate-page
+             (core/start-candidate-scan
+              idx (float-array [0.0 0.0])
+              {:candidate-limit 2 :page-size 2 :ef 20
+               :entity-filter allowed
+               :primary-snapshot-id :materialized-filter}))
+            iterative-pages
+            (drain-pages
+             (core/start-candidate-scan
+              idx (float-array [0.0 0.0])
+              {:mode :iterative :page-size 2 :ef 4
+               :strict-order? false
+               :entity-filter allowed
+               :primary-snapshot-id :iterative-filter}))]
+        (is (= [5 6] (mapv :id (:candidates materialized)))
+            "excluded nearest raw hits do not consume a materialized page")
+        (is (= [2 1] (mapv (comp count :candidates) iterative-pages))
+            "iterative pages fill relative to the allowed universe")
+        (is (= [5 6 7]
+               (mapv :id (mapcat :candidates iterative-pages))))
+        (is (= :approximate (get-in materialized [:metadata :recall])))
+        (is (every? #(= :approximate (get-in % [:metadata :recall]))
+                    iterative-pages)))
+
+      (let [^ArrayBitSet mutable-filter (ArrayBitSet. 20)
+            _ (doseq [id allowed] (.add mutable-filter id))
+            scan (core/start-candidate-scan
+                  idx (float-array [0.0 0.0])
+                  {:mode :iterative :page-size 2 :ef 4
+                   :strict-order? false
+                   :entity-filter mutable-filter
+                   :primary-snapshot-id :filter-snapshot})]
+        (.clear mutable-filter)
+        (.add mutable-filter 0)
+        (let [pages (drain-pages scan)]
+          (is (= [5 6 7] (mapv :id (mapcat :candidates pages)))
+              "a cursor snapshots an advanced native filter at creation")))
+      (is (= :invalid-entity-filter
+             (reason #(core/start-candidate-scan
+                       idx (float-array [0.0 0.0])
+                       {:entity-filter false
+                        :primary-snapshot-id :invalid-filter})))
+          "invalid falsey filters must not silently widen the universe")
       (finally
         (a/<!! (core/close! idx))))))
 
