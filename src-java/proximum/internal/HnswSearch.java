@@ -260,7 +260,7 @@ public final class HnswSearch {
                 for (int i = 0; i < count; i++) {
                     int neighborId = chunk[base + 1 + i];
                     double neighborDist = Distance.compute(seg, neighborId, dim, query, distanceType);
-                    if (neighborDist < currentDist) {
+                    if (nearer(neighborId, neighborDist, current, currentDist)) {
                         current = neighborId;
                         currentDist = neighborDist;
                         improved = true;
@@ -272,7 +272,7 @@ public final class HnswSearch {
 
                 for (int neighborId : neighbors) {
                     double neighborDist = Distance.compute(seg, neighborId, dim, query, distanceType);
-                    if (neighborDist < currentDist) {
+                    if (nearer(neighborId, neighborDist, current, currentDist)) {
                         current = neighborId;
                         currentDist = neighborDist;
                         improved = true;
@@ -295,7 +295,7 @@ public final class HnswSearch {
         int i = count;
         while (i > 0) {
             int parent = (i - 1) / 2;
-            if (dists[parent] <= dists[i]) break;
+            if (!nearer(ids[i], dists[i], ids[parent], dists[parent])) break;
             // Swap
             int tmpId = ids[parent]; double tmpDist = dists[parent];
             ids[parent] = ids[i]; dists[parent] = dists[i];
@@ -315,8 +315,8 @@ public final class HnswSearch {
             int left = 2 * i + 1;
             int right = 2 * i + 2;
             int smallest = i;
-            if (left < n && dists[left] < dists[smallest]) smallest = left;
-            if (right < n && dists[right] < dists[smallest]) smallest = right;
+            if (left < n && nearer(ids[left], dists[left], ids[smallest], dists[smallest])) smallest = left;
+            if (right < n && nearer(ids[right], dists[right], ids[smallest], dists[smallest])) smallest = right;
             if (smallest == i) break;
             // Swap
             int tmpId = ids[smallest]; double tmpDist = dists[smallest];
@@ -333,7 +333,7 @@ public final class HnswSearch {
         int i = count;
         while (i > 0) {
             int parent = (i - 1) / 2;
-            if (dists[parent] >= dists[i]) break;
+            if (!farther(ids[i], dists[i], ids[parent], dists[parent])) break;
             int tmpId = ids[parent]; double tmpDist = dists[parent];
             ids[parent] = ids[i]; dists[parent] = dists[i];
             ids[i] = tmpId; dists[i] = tmpDist;
@@ -349,8 +349,8 @@ public final class HnswSearch {
             int left = 2 * i + 1;
             int right = 2 * i + 2;
             int largest = i;
-            if (left < count && dists[left] > dists[largest]) largest = left;
-            if (right < count && dists[right] > dists[largest]) largest = right;
+            if (left < count && farther(ids[left], dists[left], ids[largest], dists[largest])) largest = left;
+            if (right < count && farther(ids[right], dists[right], ids[largest], dists[largest])) largest = right;
             if (largest == i) break;
             int tmpId = ids[largest]; double tmpDist = dists[largest];
             ids[largest] = ids[i]; dists[largest] = dists[i];
@@ -469,7 +469,8 @@ public final class HnswSearch {
                 distCompCount++;
 
                 // Always add to candidates for graph traversal (even deleted nodes help navigation)
-                if (neighborDist < furthestResult || resCount < ef) {
+                if (resCount < ef
+                        || nearer(neighborId, neighborDist, resIds[0], furthestResult)) {
                     if (candCount < maxSize) {
                         heapPush(candIds, candDists, candCount++, neighborId, neighborDist);
                     }
@@ -481,7 +482,7 @@ public final class HnswSearch {
                         maxHeapPush(resIds, resDists, resCount++, neighborId, neighborDist);
                         // Update cached furthest when heap grows
                         furthestResult = resDists[0];
-                    } else if (neighborDist < furthestResult) {
+                    } else if (nearer(neighborId, neighborDist, resIds[0], furthestResult)) {
                         // Replace furthest (O(log n))
                         maxHeapReplace(resIds, resDists, resCount, neighborId, neighborDist);
                         displacementsThisIteration++;
@@ -646,7 +647,7 @@ public final class HnswSearch {
                         maxHeapPush(resIds, resDists, resCount++, neighborId, neighborDist);
                         // Update cached furthest when heap grows
                         furthestResult = resDists[0];
-                    } else if (neighborDist < furthestResult) {
+                    } else if (nearer(neighborId, neighborDist, resIds[0], furthestResult)) {
                         // Replace furthest allowed result
                         maxHeapReplace(resIds, resDists, resCount, neighborId, neighborDist);
                         displacementsThisIteration++;
@@ -692,7 +693,7 @@ public final class HnswSearch {
             int id = ids[i];
             double dist = distances[i];
             int j = i - 1;
-            while (j >= 0 && distances[j] > dist) {
+            while (j >= 0 && farther(ids[j], distances[j], id, dist)) {
                 ids[j + 1] = ids[j];
                 distances[j + 1] = distances[j];
                 j--;
@@ -706,6 +707,16 @@ public final class HnswSearch {
         int wordIdx = nodeId >> 6;
         long bit = 1L << (nodeId & 63);
         return (visited[wordIdx] & bit) != 0;
+    }
+
+    private static boolean nearer(int id, double distance, int otherId, double otherDistance) {
+        int comparison = Double.compare(distance, otherDistance);
+        return comparison < 0 || (comparison == 0 && id < otherId);
+    }
+
+    private static boolean farther(int id, double distance, int otherId, double otherDistance) {
+        int comparison = Double.compare(distance, otherDistance);
+        return comparison > 0 || (comparison == 0 && id > otherId);
     }
 
     /**

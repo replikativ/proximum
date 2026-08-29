@@ -19,6 +19,16 @@
     (catch clojure.lang.ExceptionInfo e
       (:reason (ex-data e)))))
 
+(defn- drain-pages [scan]
+  (loop [scan scan pages [] remaining 1000]
+    (when (zero? remaining)
+      (throw (ex-info "Candidate scan did not terminate" {})))
+    (let [page (core/candidate-page scan)
+          pages (conj pages page)]
+      (if (:exhausted? page)
+        pages
+        (recur (:continuation page) pages (dec remaining))))))
+
 (deftest stable-candidate-pagination-test
   (let [base (test-index)
         idx (reduce (fn [i n]
@@ -105,5 +115,220 @@
          idx query {:candidate-limit 6 :ef 2 :primary-snapshot-id :snapshot}))
       (is (= [{} {:ef 30} {:ef 6}] @calls)
           "an omitted :ef delegates to the index generation's beam")
+      (finally
+        (a/<!! (core/close! idx))))))
+
+(deftest iterative-candidate-scan-resumes-native-frontier-test
+  (let [base (test-index)
+        idx (reduce (fn [i n]
+                      (core/insert i (float-array [(float n) 0.0]) n))
+                    base
+                    (range 80))]
+    (try
+      (let [scan (core/start-candidate-scan
+                  idx (float-array [0.0 0.0])
+                  {:mode :iterative :page-size 5 :ef 8
+                   :strict-order? false
+                   :primary-snapshot-id :iterative-test})
+            pages (drain-pages scan)
+            candidates (vec (mapcat :candidates pages))
+            ids (mapv :id candidates)
+            continuations (keep :continuation pages)
+            last-page (peek pages)]
+        (is (> (count ids) 8)
+            "resuming explores beyond the first ef candidates")
+        (is (= (count ids) (count (distinct ids))))
+        (is (> (count pages) 2))
+        (is (= (count continuations) (count (distinct continuations))))
+        (is (= :resumable-hnsw-frontier (:exhaustion-scope last-page)))
+        (is (= :frontier-empty (:stop-reason last-page)))
+        (is (= (count ids) (get-in last-page [:metadata :emitted-count])))
+        (is (>= (get-in last-page [:metadata :visited-count]) (count ids))))
+
+      (let [pages (drain-pages
+                   (core/start-candidate-scan
+                    idx (float-array [0.0 0.0])
+                    {:mode :iterative :page-size 3 :ef 6
+                     :strict-order? true
+                     :primary-snapshot-id :strict-test}))
+            distances (mapv :rank-distance (mapcat :candidates pages))]
+        (is (apply <= distances)
+            "strict mode never emits a distance regression across pages")
+        (is (= (count distances) (count (distinct (map :id (mapcat :candidates pages)))))))
+
+      (let [pages (drain-pages
+                   (core/start-candidate-scan
+                    idx (float-array [0.0 0.0])
+                    {:mode :iterative :page-size 5 :ef 8
+                     :max-visited 16
+                     :primary-snapshot-id :budget-test}))
+            last-page (peek pages)]
+        (is (= :visited-budget (:stop-reason last-page)))
+        (is (<= (get-in last-page [:metadata :visited-count]) 16)))
+      (finally
+        (a/<!! (core/close! idx))))))
+
+(deftest iterative-continuations-are-affine-and-retryable-test
+  (let [base (test-index)
+        idx (reduce (fn [i n]
+                      (core/insert i (float-array [(float n) 0.0]) n))
+                    base
+                    (range 30))]
+    (try
+      (let [scan (core/start-candidate-scan
+                  idx (float-array [0.0 0.0])
+                  {:mode :iterative :page-size 3 :ef 6
+                   :primary-snapshot-id :affine})
+            page-1 (core/candidate-page scan)
+            continuation-1 (:continuation page-1)
+            page-2 (core/candidate-page continuation-1)]
+        (is (thrown-with-msg? IllegalStateException #"stale or out-of-order"
+                              (core/candidate-page scan)))
+        (is (thrown-with-msg? IllegalStateException #"stale or out-of-order"
+                              (core/candidate-page continuation-1)))
+        (core/close-candidate-scan! (:continuation page-2)))
+
+      (let [scan (core/start-candidate-scan
+                  idx (float-array [0.0 0.0])
+                  {:mode :iterative :page-size 3 :ef 6
+                   :primary-snapshot-id :retry})]
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo #"conversion failed"
+             (with-redefs [p/get-metadata
+                           (fn [_ _]
+                             (throw (ex-info "conversion failed" {})))]
+               (core/candidate-page scan))))
+        (let [page (core/candidate-page scan)]
+          (is (= 3 (count (:candidates page)))
+              "the same staged native page is available after conversion failure")
+          (core/close-candidate-scan! (:continuation page))))
+      (finally
+        (a/<!! (core/close! idx))))))
+
+(deftest iterative-cursor-leases-vector-store-test
+  (let [base (test-index)
+        idx (core/insert base (float-array [0.0 0.0]) :one)
+        scan (core/start-candidate-scan
+              idx (float-array [0.0 0.0])
+              {:mode :iterative :page-size 1 :ef 2
+               :primary-snapshot-id :lease})
+        close-result (core/close! idx)
+        timeout (a/timeout 50)]
+    (is (= timeout (second (a/alts!! [close-result timeout])))
+        "index close waits for an active cursor lease")
+    (is (= [:one] (mapv :id (:candidates (core/candidate-page scan))))
+        "a close request cannot invalidate the cursor's MemorySegment")
+    (is (nil? (a/<!! close-result)))))
+
+(deftest iterative-frontier-memory-budget-test
+  (let [base (test-index)
+        idx (reduce (fn [i n]
+                      (core/insert i (float-array [(float n) 0.0]) n))
+                    base
+                    (range 30))]
+    (try
+      (let [pages (drain-pages
+                   (core/start-candidate-scan
+                    idx (float-array [0.0 0.0])
+                    {:mode :iterative :page-size 2 :ef 2
+                     :max-frontier-nodes 2
+                     :primary-snapshot-id :memory-budget}))]
+        (is (= :memory-budget (:stop-reason (peek pages)))))
+      (finally
+        (a/<!! (core/close! idx))))))
+
+(deftest transport-page-size-does-not-change-traversal-batches-test
+  (let [base (test-index)
+        idx (reduce (fn [i n]
+                      (core/insert i (float-array [(float n) 0.0]) n))
+                    base
+                    (range 40))]
+    (try
+      (let [options {:mode :iterative :ef 4 :strict-order? false
+                     :primary-snapshot-id :page-size}
+            small (->> (core/start-candidate-scan
+                        idx (float-array [0.0 0.0])
+                        (assoc options :page-size 2))
+                       drain-pages
+                       (mapcat :candidates)
+                       (take 20)
+                       (mapv :internal-id))
+            large-page (core/candidate-page
+                        (core/start-candidate-scan
+                         idx (float-array [0.0 0.0])
+                         (assoc options :page-size 20)))
+            large (mapv :internal-id (:candidates large-page))]
+        (is (= small large)
+            "transport batching does not widen ef or change traversal order")
+        (core/close-candidate-scan! (:continuation large-page)))
+      (finally
+        (a/<!! (core/close! idx))))))
+
+(deftest cursor-cancellation-covers-unread-and-pending-pages-test
+  (let [base (test-index)
+        idx (reduce (fn [i n]
+                      (core/insert i (float-array [(float n) 0.0]) n))
+                    base
+                    (range 10))]
+    (try
+      (let [unread (core/start-candidate-scan
+                    idx (float-array [0.0 0.0])
+                    {:mode :iterative :page-size 2 :ef 4
+                     :primary-snapshot-id :unread})]
+        (core/close-candidate-scan! unread)
+        (is (thrown-with-msg? IllegalStateException #"closed"
+                              (core/candidate-page unread))))
+
+      (let [pending (core/start-candidate-scan
+                     idx (float-array [0.0 0.0])
+                     {:mode :iterative :page-size 2 :ef 4
+                      :primary-snapshot-id :pending})
+            cursor (:cursor pending)]
+        (.page ^proximum.internal.HnswCandidateCursor cursor 0 2)
+        (core/close-candidate-scan! pending)
+        (is (thrown-with-msg? IllegalStateException #"closed"
+                              (.page ^proximum.internal.HnswCandidateCursor
+                               cursor 0 2))))
+      (finally
+        (a/<!! (core/close! idx))))))
+
+(deftest close-publication-rejects-new-cursor-leases-test
+  (let [base (test-index)
+        idx (core/insert base (float-array [0.0 0.0]) :one)
+        active (core/start-candidate-scan
+                idx (float-array [0.0 0.0])
+                {:mode :iterative :page-size 1 :ef 2
+                 :primary-snapshot-id :active})
+        close-result (core/close! idx)]
+    (is (= :vector-store-closing
+           (reason #(core/start-candidate-scan
+                     idx (float-array [0.0 0.0])
+                     {:mode :iterative :page-size 1 :ef 2
+                      :primary-snapshot-id :too-late}))))
+    (core/close-candidate-scan! active)
+    (is (nil? (a/<!! close-result)))))
+
+(deftest native-search-breaks-distance-ties-by-internal-id-test
+  (let [base (test-index)
+        idx (reduce (fn [i n]
+                      (core/insert i (float-array [1.0 0.0]) n))
+                    base
+                    (range 10))]
+    (try
+      (is (= (range 5)
+             (map :id (core/search idx (float-array [0.0 0.0]) 5 {:ef 20}))))
+      (is (= (range 5)
+             (map :id (core/search-filtered
+                       idx (float-array [0.0 0.0]) 5 (set (range 10))
+                       {:ef 20}))))
+      (let [pages (drain-pages
+                   (core/start-candidate-scan
+                    idx (float-array [0.0 0.0])
+                    {:mode :iterative :page-size 2 :ef 4
+                     :strict-order? true
+                     :primary-snapshot-id :ties}))
+            internal-ids (mapv :internal-id (mapcat :candidates pages))]
+        (is (apply <= internal-ids)
+            "strict iterative ordering includes the internal-id tie-break"))
       (finally
         (a/<!! (core/close! idx))))))

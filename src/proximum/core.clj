@@ -76,3 +76,4 @@
 ;; for automatic HTTP serialization.
 (def start-candidate-scan candidates/start-candidate-scan)
 (def candidate-page candidates/candidate-page)
+(def close-candidate-scan! candidates/close-candidate-scan!)

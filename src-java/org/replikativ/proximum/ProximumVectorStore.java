@@ -648,10 +648,10 @@ public class ProximumVectorStore implements AutoCloseable {
     }
 
     /**
-     * Search with filtering predicate or ID set.
+     * Search with filtering predicate or iterable ID collection.
      * Filter can be:
      *   - (fn [id metadata] boolean) - predicate receives external ID
-     *   - Set of allowed external IDs
+     *   - Iterable collection of allowed external IDs
      *
      * Example:
      *   (search-filtered idx query 10 #{"doc-1" "doc-2"})
@@ -1006,10 +1006,10 @@ public class ProximumVectorStore implements AutoCloseable {
     }
 
     /**
-     * Search with filtering predicate or ID set.
+     * Search with filtering predicate or iterable ID collection.
      * Filter can be:
      *   - (fn [id metadata] boolean) - predicate receives external ID
-     *   - Set of allowed external IDs
+     *   - Iterable collection of allowed external IDs
      *
      * Example:
      *   (search-filtered idx query 10 #{"doc-1" "doc-2"})

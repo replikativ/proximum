@@ -29,7 +29,8 @@
             [konserve.gc-guard :as guard]
             [konserve.protocols :as kp]
             [clojure.core.async :as a])
-  (:import [proximum.internal PersistentEdgeIndex HnswInsert HnswSearch ArrayBitSet]
+  (:import [proximum.internal PersistentEdgeIndex HnswInsert HnswSearch
+            HnswCandidateCursor ArrayBitSet]
            [java.lang.foreign MemorySegment]))
 
 ;; -----------------------------------------------------------------------------
@@ -922,6 +923,55 @@
     (let [vectors (.-vectors idx)]
       (- (vectors/capacity vectors)
          (vectors/count-vectors vectors)))))  ; Close first extend-type
+
+(extend-type HnswIndex
+  p/CandidateSearch
+  (start-candidate-search
+    [idx query opts]
+    (let [vectors (.-vectors idx)
+          pes-edges (.-pes-edges idx)
+          dim (.-dim idx)
+          distance-type (.-distance-type idx)
+          ef (max 1 (long (or (:ef opts) (:ef-search (.-state idx)) 50)))
+          float-arr (validate-float-array query dim distance-type)
+          _ (ensure-cosine-indexable! float-arr distance-type :query)
+          _ (when (= distance-type 1)
+              (HnswSearch/normalizeVector float-arr))
+          ^MemorySegment seg (vectors/get-segment vectors)
+          strict-order? (not= false (:strict-order? opts))
+          max-visited (long (or (:max-visited opts) 0))
+          max-distance-computations
+          (long (or (:max-distance-computations opts) 0))
+          timeout-nanos (long (if-let [timeout-ms (:timeout-ms opts)]
+                                (* 1000000 timeout-ms)
+                                0))
+          max-frontier-nodes (long (or (:max-frontier-nodes opts) 100000))
+          _ (doseq [[option value]
+                    [[:max-visited max-visited]
+                     [:max-distance-computations max-distance-computations]
+                     [:timeout-ms (long (or (:timeout-ms opts) 0))]
+                     [:max-frontier-nodes max-frontier-nodes]]]
+              (when (neg? value)
+                (throw (ex-info "Candidate-search budgets cannot be negative"
+                                {:reason :invalid-candidate-budget
+                                 :option option :value value}))))
+          _ (when (and (pos? max-frontier-nodes)
+                       (< max-frontier-nodes ef))
+              (throw (ex-info ":max-frontier-nodes must fit one ef-sized traversal batch"
+                              {:reason :invalid-candidate-budget
+                               :option :max-frontier-nodes
+                               :value max-frontier-nodes
+                               :ef ef})))
+          lease (vectors/acquire-lease! vectors)]
+      (try
+        (HnswCandidateCursor. seg pes-edges float-arr dim (int ef)
+                              distance-type strict-order?
+                              (int (vectors/count-vectors vectors))
+                              max-visited max-distance-computations
+                              timeout-nanos max-frontier-nodes lease)
+        (catch Throwable failure
+          (.run ^Runnable lease)
+          (throw failure))))))
 
 ;; IndexLifecycle protocol implementation
 (extend-type HnswIndex
