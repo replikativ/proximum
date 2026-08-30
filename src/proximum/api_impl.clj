@@ -104,7 +104,12 @@
            results))))
 
 (defn search-filtered
-  "Search with filtering. Filter receives external IDs."
+  "Search with filtering. Filter receives external IDs.
+
+   `opts :filter-strategy` is explicit: `:hnsw` (default) traverses the ANN
+   graph and has approximate recall; `:exact` computes a stable exact top-k
+   over only the allowed IDs. The latter is intended for sparse upstream
+   filters where graph traversal costs more than the bounded distance scan."
   ([idx query k filter-pred]
    (search-filtered idx query k filter-pred nil))
   ([idx query k filter-pred opts]

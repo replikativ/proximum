@@ -569,10 +569,30 @@
           (is (= [high-id] (mapv :id results)))
           (a/<!! (core/close! idx))))
 
+      (testing "exact filtered strategy has complete stable top-k recall"
+        (let [idx (create-test-index {:type :hnsw
+                                      :dim 2
+                                      :M 8
+                                      :ef-construction 50
+                                      :vectors-path (str path "-exact")
+                                      :capacity 100})
+              idx (core/insert-batch
+                   idx
+                   (mapv #(float-array [(float %) 0.0]) (range 20))
+                   (range 20))
+              results (core/search-filtered
+                       idx (float-array [7.25 0.0]) 4
+                       [1 5 7 8 12 19]
+                       {:filter-strategy :exact})]
+          (is (= [7 8 5 12] (mapv :id results)))
+          (is (apply <= (map :distance results)))
+          (a/<!! (core/close! idx))))
+
       (finally
         (cleanup path)
         (cleanup (str path "-set"))
-        (cleanup (str path "-iterable"))))))
+        (cleanup (str path "-iterable"))
+        (cleanup (str path "-exact"))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Fork performance tests

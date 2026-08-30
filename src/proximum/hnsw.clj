@@ -864,10 +864,20 @@
              (throw (ex-info "search-filtered requires a predicate fn, Set, or ArrayBitSet"
                              {:type (type pred-or-set)})))
 
-           ^doubles result (HnswSearch/searchFiltered seg pes-edges float-arr
-                                                      dim (int k) (int ef)
-                                                      bitset
-                                                      distance-type)]
+           filter-strategy (or (:filter-strategy opts) :hnsw)
+           _ (when-not (#{:hnsw :exact} filter-strategy)
+               (throw (ex-info ":filter-strategy must be :hnsw or :exact"
+                               {:reason :invalid-filter-strategy
+                                :filter-strategy filter-strategy})))
+           ^doubles result
+           (case filter-strategy
+             :exact
+             (HnswSearch/searchExactFiltered seg pes-edges float-arr dim
+                                             (int k) bitset distance-type n)
+             :hnsw
+             (HnswSearch/searchFiltered seg pes-edges float-arr
+                                        dim (int k) (int ef)
+                                        bitset distance-type))]
        (loop [i 0
               acc (transient [])]
          (if (< i (alength result))

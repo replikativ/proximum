@@ -74,4 +74,32 @@ public final class ArrayBitSet {
         }
         return count;
     }
+
+    /**
+     * Return the first set bit at or after {@code fromIndex}, or -1.
+     *
+     * This keeps sparse exact-filter scans proportional to the allowed set
+     * instead of probing every possible node ID.
+     */
+    public int nextSetBit(int fromIndex) {
+        if (fromIndex < 0) {
+            fromIndex = 0;
+        }
+        int wordIndex = fromIndex >> 5;
+        if (wordIndex >= buffer.length) {
+            return -1;
+        }
+
+        int word = buffer[wordIndex] & (-1 << (fromIndex & 31));
+        while (true) {
+            if (word != 0) {
+                return (wordIndex << 5) + Integer.numberOfTrailingZeros(word);
+            }
+            wordIndex++;
+            if (wordIndex >= buffer.length) {
+                return -1;
+            }
+            word = buffer[wordIndex];
+        }
+    }
 }

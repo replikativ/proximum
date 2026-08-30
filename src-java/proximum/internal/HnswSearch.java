@@ -229,6 +229,61 @@ public final class HnswSearch {
     }
 
     /**
+     * Compute the exact top-k inside an allowed-node bitset.
+     *
+     * Sparse SQL prefilters are often cheaper to evaluate directly than to
+     * traverse the HNSW graph until it happens to encounter enough allowed
+     * nodes. The caller makes that cost decision explicitly; this method has
+     * complete recall over {@code allowedIds}. Results use the same stable
+     * distance/id ordering as ordinary HNSW search.
+     */
+    public static double[] searchExactFiltered(
+            MemorySegment seg,
+            PersistentEdgeIndex edges,
+            float[] query,
+            int dim,
+            int k,
+            ArrayBitSet allowedIds,
+            int distanceType,
+            int vectorCount) {
+
+        if (allowedIds == null || k <= 0 || vectorCount <= 0) {
+            return new double[0];
+        }
+
+        int capacity = Math.min(k, allowedIds.cardinality());
+        if (capacity == 0) {
+            return new double[0];
+        }
+
+        int[] resultIds = new int[capacity];
+        double[] resultDistances = new double[capacity];
+        int resultCount = 0;
+
+        for (int id = allowedIds.nextSetBit(0);
+                id >= 0 && id < vectorCount;
+                id = allowedIds.nextSetBit(id + 1)) {
+            if (edges.isDeleted(id)) {
+                continue;
+            }
+            double distance = Distance.compute(seg, id, dim, query, distanceType);
+            if (resultCount < capacity) {
+                maxHeapPush(resultIds, resultDistances, resultCount++, id, distance);
+            } else if (nearer(id, distance, resultIds[0], resultDistances[0])) {
+                maxHeapReplace(resultIds, resultDistances, resultCount, id, distance);
+            }
+        }
+
+        sortByDistance(resultIds, resultDistances, resultCount);
+        double[] result = new double[resultCount * 2];
+        for (int i = 0; i < resultCount; i++) {
+            result[i * 2] = resultIds[i];
+            result[i * 2 + 1] = resultDistances[i];
+        }
+        return result;
+    }
+
+    /**
      * Greedy search at a layer - find single nearest node.
      * Uses zero-copy neighbor access for layer 0.
      */
