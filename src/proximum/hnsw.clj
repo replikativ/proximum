@@ -827,7 +827,10 @@
            pes-edges (.-pes-edges idx)
            dim (.-dim idx)
            distance-type (.-distance-type idx)
-           ef (or (:ef opts) (* k 10))
+           ;; A filtered result heap cannot return more than `ef` admitted
+           ;; nodes. Keep the same ef>=k invariant as ordinary search even
+           ;; when a caller supplies a smaller session-level beam.
+           ef (max k (or (:ef opts) (* k 10)))
            float-arr (validate-float-array query dim distance-type)
            _ (ensure-cosine-indexable! float-arr distance-type :query)
            _ (when (= distance-type 1)

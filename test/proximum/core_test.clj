@@ -8,7 +8,7 @@
             [clojure.set :as set]
             [clojure.core.async :as a])
   (:import [java.io File]
-           [proximum.internal PersistentEdgeIndex Distance]))
+           [proximum.internal ArrayBitSet PersistentEdgeIndex Distance]))
 
 (def ^:dynamic *store-id* nil)
 
@@ -17,6 +17,28 @@
     (f)))
 
 (use-fixtures :each with-store-id-fixture)
+
+(deftest sparse-array-bitset-iteration-test
+  (let [^ArrayBitSet bitset (ArrayBitSet. 100000000)]
+    (doseq [id [7 70000003 99999999]]
+      (.add bitset id))
+    ;; Cardinality and successor lookup are maintained from the non-empty
+    ;; words, rather than rescanning 3.1 million backing words per query.
+    (is (= 3 (.cardinality bitset)))
+    (is (= 7 (.nextSetBit bitset 0)))
+    (is (= 70000003 (.nextSetBit bitset 8)))
+    (is (= 99999999 (.nextSetBit bitset 70000004)))
+    (is (= -1 (.nextSetBit bitset 100000000)))
+    (.add bitset 7)
+    (is (= 3 (.cardinality bitset)) "duplicate adds do not inflate cardinality")
+    (.remove bitset 70000003)
+    (is (= 2 (.cardinality bitset)))
+    (is (= 99999999 (.nextSetBit bitset 8)))
+    (let [^ArrayBitSet copy (.clone bitset)]
+      (.clear bitset)
+      (is (zero? (.cardinality bitset)))
+      (is (= [7 99999999]
+             [(.nextSetBit copy 0) (.nextSetBit copy 8)])))))
 
 (defn file-store-config
   ([path]
@@ -586,6 +608,11 @@
                        {:filter-strategy :exact})]
           (is (= [7 8 5 12] (mapv :id results)))
           (is (apply <= (map :distance results)))
+          (is (= 6
+                 (count (core/search-filtered
+                         idx (float-array [7.25 0.0]) 6 (range 20)
+                         {:ef 2 :filter-strategy :hnsw})))
+              "an explicit ef below k cannot cap the filtered result heap")
           (a/<!! (core/close! idx))))
 
       (finally
