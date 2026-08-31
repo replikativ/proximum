@@ -235,6 +235,7 @@ workflows:
             - test-clojure
             - test-java-api
             - test-adapters
+            - backward-compatibility
       - deploy-spring-ai:
           context:
             - clojars-deploy
