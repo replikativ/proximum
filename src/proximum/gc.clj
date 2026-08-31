@@ -36,19 +36,17 @@
    Returns set of all addresses (UUIDs) used by the PSS."
   [pss-root storage cmp]
   (if (and pss-root storage)
-    (try
-      (let [addresses (atom #{})
-            ;; Restore PSS from root to enable walking
-            pss (pss/restore-by cmp pss-root storage)]
-        (pss/walk-addresses pss
-                            (fn [addr]
-                              (when addr
-                                (swap! addresses conj addr))
-                              true))  ; Return true to continue walking
-        @addresses)
-      (catch Exception _
-        ;; If PSS can't be restored, just return the root address
-        #{pss-root}))
+    (let [addresses (atom #{})
+          ;; Restore PSS from root to enable walking. Traversal failures must
+          ;; escape: a partial mark set is indistinguishable from permission to
+          ;; delete live chunks.
+          pss (pss/restore-by cmp pss-root storage)]
+      (pss/walk-addresses pss
+                          (fn [addr]
+                            (when addr
+                              (swap! addresses conj addr))
+                            true))
+      @addresses)
     #{}))
 
 (defn- mark-address-pss
@@ -59,28 +57,21 @@
    - chunk-keys: Storage keys for chunks (e.g., [:vectors :chunk uuid])"
   [pss-root storage chunk-key-fn]
   (if (and pss-root storage)
-    (try
-      (let [pss-addrs (atom #{})
-            chunk-keys (atom #{})
-            ;; Restore PSS from root
-            pss (pss/restore-by storage/addr-entry-comparator pss-root storage)]
-        ;; Walk PSS nodes to collect their addresses
-        (pss/walk-addresses pss
-                            (fn [addr]
-                              (when addr
-                                (swap! pss-addrs conj addr))
-                              true))
-        ;; Walk entries to collect chunk keys
-        (doseq [entry pss]
-          (when-let [chunk-uuid (:addr entry)]
-            (swap! chunk-keys conj (chunk-key-fn chunk-uuid))))
-        {:pss-addrs @pss-addrs :chunk-keys @chunk-keys})
-      (catch Exception _
-        ;; If PSS can't be restored, just return the root address
-        {:pss-addrs #{pss-root} :chunk-keys #{}}))
+    (let [pss-addrs (atom #{})
+          chunk-keys (atom #{})
+          pss (pss/restore-by storage/addr-entry-comparator pss-root storage)]
+      (pss/walk-addresses pss
+                          (fn [addr]
+                            (when addr
+                              (swap! pss-addrs conj addr))
+                            true))
+      (doseq [entry pss]
+        (when-let [chunk-uuid (:addr entry)]
+          (swap! chunk-keys conj (chunk-key-fn chunk-uuid))))
+      {:pss-addrs @pss-addrs :chunk-keys @chunk-keys})
     {:pss-addrs #{} :chunk-keys #{}}))
 
-(defn- mark-snapshot
+(defn snapshot-reachable-keys
   "Collect all storage keys referenced by a single snapshot.
 
    Returns set of keys including:
@@ -127,6 +118,22 @@
      (:chunk-keys edges-result)
      meta-pss-addrs
      ext-pss-addrs)))
+
+(defn generation-reachable-keys
+  "Return every durable key required to restore one immutable generation.
+
+   This deliberately does not traverse parents: a Proximum snapshot contains
+   complete vector, graph, metadata and external-id roots.  Parent ids describe
+   history, not restore dependencies."
+  [store storage generation-id]
+  (let [snapshot (k/get store generation-id nil {:sync? true})]
+    (when-not snapshot
+      (throw (ex-info "Generation not found"
+                      {:generation-id generation-id
+                       :reason :generation-not-found})))
+    (-> (snapshot-reachable-keys snapshot storage)
+        (conj generation-id)
+        (conj :index/config))))
 
 ;; -----------------------------------------------------------------------------
 ;; Reachability Analysis
@@ -183,7 +190,7 @@
                    (let [parents (:parents snapshot #{})
                           ;; Filter out branch keywords from parents - they're tracked separately
                          parent-commits (remove keyword? parents)
-                         snapshot-keys (mark-snapshot snapshot storage)
+                         snapshot-keys (snapshot-reachable-keys snapshot storage)
                          new-wl (-> wl
                                     (conj ref)  ; The commit/branch key itself
                                      ;; ...AND the commit it names. A branch head is
@@ -247,15 +254,31 @@
                      (default: epoch, i.e. keep all history)
 
    Options:
-     :batch-size - Deletion batch size (default 1000)"
+     :batch-size     - Deletion batch size (default 1000)
+     :generation-ids - COMPLETE set of detached immutable generation UUIDs
+                       retained by an embedding owner such as Datahike. These
+                       are authoritative roots in addition to native branches.
+
+   A store with neither a native branch nor a supplied generation id is refused:
+   sweeping it would have no authoritative root. If detached generations share
+   a store with native branches, callers must still supply every retained
+   detached id; Proximum cannot infer roots held by another database. Missing
+   generations and reachability traversal failures abort before sweep."
   ([idx] (gc! idx (java.util.Date. 0)))
   ([idx remove-before] (gc! idx remove-before {}))
-  ([idx remove-before {:keys [batch-size] :or {batch-size 1000}}]
+  ([idx remove-before {:keys [batch-size generation-ids]
+                       :or {batch-size 1000}}]
    (when-not (p/raw-storage idx)
      (throw (ex-info "Cannot GC in-memory index. Create the index with durable :store-config."
                      {:hint "Use (create-index {:type :hnsw :dim dim :store-config {...} :mmap-dir \"/path\"})"})))
 
-   (let [edge-store (p/raw-storage idx)
+   (let [generation-ids (set (or generation-ids #{}))
+         invalid-generation-ids (seq (remove uuid? generation-ids))
+         _ (when invalid-generation-ids
+             (throw (ex-info "GC generation roots must be UUIDs"
+                             {:reason :gc-invalid-generation-ids
+                              :generation-ids (vec invalid-generation-ids)})))
+         edge-store (p/raw-storage idx)
          storage (p/storage idx)
          store-id (kp/store-id edge-store)
          ;; Guard first, mark second — see above.
@@ -263,7 +286,14 @@
                   (guard/cutoff store-id (ku/now))
                   (ku/now))
          branches (or (k/get edge-store :branches nil {:sync? true}) #{})
-         whitelist (mark-reachable edge-store storage branches remove-before)]
+         _ (when (and (empty? branches) (empty? generation-ids))
+             (throw (ex-info
+                     "No authoritative GC roots were supplied. Detached generations are not native branch heads; pass every generation id retained by the embedding owner."
+                     {:reason :gc-missing-authoritative-roots})))
+         whitelist (into (mark-reachable edge-store storage branches remove-before)
+                         (mapcat #(generation-reachable-keys
+                                   edge-store storage %))
+                         generation-ids)]
      (k-gc/sweep! edge-store whitelist cutoff batch-size {:sync? true}))))
 
 ;; Note: history function moved to proximum.versioning

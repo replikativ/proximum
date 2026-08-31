@@ -8,14 +8,14 @@
 
 > 📋 **Help shape Proximum!** We'd love your input. Please fill out our [2-minute feedback survey](https://docs.google.com/forms/d/e/1FAIpQLSeUQuw5SPyIx661e1pwZiX0100bP-DPpF2Zfpptg1h6k14OTA/viewform).
 
-A high-performance, embeddable vector database for Clojure and Java with **Git-like versioning** and **zero-cost branching**.
+A high-performance, embeddable vector database for Clojure and Java with **Git-like versioning** and **copy-on-write branching**.
 
 ## Why Proximum?
 
 Unlike traditional vector databases, Proximum brings **persistent data structure semantics** to vector search:
 
 - ✨ **Time Travel**: Query any historical snapshot
-- 🌿 **Zero-Cost Branching**: Fork indices for experiments without copying data
+- 🌿 **Efficient Branching**: Share immutable data and use filesystem reflinks for vector storage when available
 - 🔒 **Immutability**: All operations return new versions, enabling safe concurrency
 - 💾 **True Persistence**: Durable storage with structural sharing
 - 🚀 **High Performance**: SIMD-accelerated search with competitive recall
@@ -238,9 +238,11 @@ ProximumVectorStore historical = index.asOf(commitId);
 
 **Use Cases:** Audit trails, debugging, A/B testing, reproducible results
 
-### 🌿 Zero-Cost Branching
+### 🌿 Copy-on-Write Branching
 
-Fork an index for experiments without copying data:
+Fork an index for experiments while sharing immutable data. Vector mmap storage
+uses a filesystem reflink when the runtime probe succeeds and otherwise falls
+back to a file copy:
 
 ```java
 index = index.sync().get();
@@ -269,7 +271,8 @@ Storage operations are non-blocking and return immediately for efficient I/O:
 **Async Operations:**
 - `sync!` / `sync()` - Persist changes and create commit
 - `flush!` / `flush()` - Force pending writes to storage
-- `gc!` / `gc()` - Garbage collect unreachable commits
+- `gc!` / `gc()` - Garbage collect unreachable commits (detached embedding
+  generations require the owner's complete `:generation-ids` root set)
 - `close!` / `close()` - Release resources (mmap, file handles)
 
 **Clojure - Blocking:**
@@ -402,7 +405,7 @@ datalevin/usearch         1455            2424         403.8      661.8      75.
 **Key features:**
 - Pure JVM with SIMD acceleration (Java Vector API)
 - No native dependencies, works on all platforms
-- Persistent storage with zero-cost branching
+- Persistent storage with structural sharing and copy-on-write branching
 
 ---
 

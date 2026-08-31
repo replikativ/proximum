@@ -106,6 +106,10 @@
   [addr]
   [:vectors :chunk addr])
 
+(defrecord MmapResource
+           [mmap-path mmap-buf mem-segment arena delete-on-last? refs closed?
+            linear-tip])
+
 (defrecord VectorStore
            [store          ;; konserve store
             dim            ;; vector dimensionality
@@ -127,7 +131,18 @@
             commit-hash         ;; atom: current commit hash (chained from parent + new chunks)
             pending-chunk-hashes ;; atom: [hash ...] for chunks written since last sync
             chunk-address-map   ;; atom: {chunk-id -> hash-uuid} for merkle addressing
+            close-result        ;; atom: nil or the one shared close completion channel
+            active-leases       ;; atom: native cursors using the shared Arena
+            cleanup-started?    ;; atom: close cleanup launched exactly once
+            mmap-resource       ;; ref-counted mapping shared by one linear lineage
+            linear-parent       ;; previous logical handle in this mmap lineage
             ])
+
+(defn- mmap-resource
+  [mmap-path mmap-buf mem-segment arena delete-on-last?]
+  (->MmapResource mmap-path mmap-buf mem-segment arena
+                  (atom (boolean delete-on-last?)) (atom 1) (atom false)
+                  (atom nil)))
 
 (defn- chunk-id
   "Get chunk ID for a vector index."
@@ -333,24 +348,33 @@
   (let [actual-mmap-path (or mmap-path
                              (str (System/getProperty "java.io.tmpdir")
                                   "/vectors-" (java.util.UUID/randomUUID) ".mmap"))
-        {:keys [mmap-buf mem-segment arena]} (create-mmap-file actual-mmap-path dim chunk-size capacity)]
-    (->VectorStore
-     store
-     dim
-     chunk-size
-     (atom 0)
-     (atom [])           ;; write-buffer
-     (atom #{})          ;; pending-writes
-     actual-mmap-path
-     (nil? mmap-path)    ;; owns-mmap-file? - true only if we generated the path
-     mmap-buf
-     mem-segment
-     arena
-     capacity
-     crypto-hash?
-     (when crypto-hash? (atom nil))   ;; commit-hash
-     (when crypto-hash? (atom []))    ;; pending-chunk-hashes
-     (atom {}))))                      ;; chunk-address-map (always, for PSS storage)
+        {:keys [mmap-buf mem-segment arena]} (create-mmap-file actual-mmap-path dim chunk-size capacity)
+        resource (mmap-resource actual-mmap-path mmap-buf mem-segment arena
+                                (nil? mmap-path))]
+    (let [vs (->VectorStore
+              store
+              dim
+              chunk-size
+              (atom 0)
+              (atom [])           ;; write-buffer
+              (atom #{})          ;; pending-writes
+              actual-mmap-path
+              (nil? mmap-path)    ;; owns-mmap-file? - true only if we generated the path
+              mmap-buf
+              mem-segment
+              arena
+              capacity
+              crypto-hash?
+              (when crypto-hash? (atom nil))   ;; commit-hash
+              (when crypto-hash? (atom []))    ;; pending-chunk-hashes
+              (atom {})                          ;; chunk-address-map (always, for PSS storage)
+              (atom nil)                         ;; close-result
+              (atom 0)                           ;; active-leases
+              (atom false)                       ;; cleanup-started?
+              resource
+              nil)]                              ;; linear-parent
+      (reset! (:linear-tip resource) vs)
+      vs)))
 
 (defn open-store*
   "Internal: Open an existing vector store. All params required.
@@ -427,6 +451,8 @@
         ;; The created capacity governs whenever we know it, however big the
         ;; file underneath happens to be.
          store-capacity (if capacity required-capacity file-capacity)
+         resource (mmap-resource actual-mmap-path mmap-buf mem-segment arena
+                                 (nil? mmap-path))
         ;; Load chunks from konserve that the mmap does not already hold.
         ;; Gate on reuse-existing?, NOT mmap-compatible?: when the mapping is
         ;; rejected (too small) we recreate it, but create-mmap-file setLengths
@@ -488,24 +514,30 @@
        (update-header-count! mmap-buf vector-count)
        (update-header-commit! mmap-buf snapshot-commit-id)
        (.force ^MappedByteBuffer mmap-buf))
-     (->VectorStore
-      store
-      dim
-      chunk-size
-      (atom vector-count)
-      (atom [])
-      (atom #{})
-      actual-mmap-path
-      (nil? mmap-path)    ;; owns-mmap-file? - true only if we generated the path
-      mmap-buf
-      mem-segment
-      arena
-      store-capacity
-      crypto-hash?
-      (when crypto-hash? (atom commit-hash))
-      (when crypto-hash? (atom []))
-      (atom (or address-map {})))))  ;; Always create chunk-address-map
-  )
+     (let [vs (->VectorStore
+               store
+               dim
+               chunk-size
+               (atom vector-count)
+               (atom [])
+               (atom #{})
+               actual-mmap-path
+               (nil? mmap-path)    ;; owns-mmap-file? - true only if we generated the path
+               mmap-buf
+               mem-segment
+               arena
+               store-capacity
+               crypto-hash?
+               (when crypto-hash? (atom commit-hash))
+               (when crypto-hash? (atom []))
+               (atom (or address-map {}))     ;; Always create chunk-address-map
+               (atom nil)                     ;; close-result
+               (atom 0)                       ;; active-leases
+               (atom false)                   ;; cleanup-started?
+               resource
+               nil)]                          ;; linear-parent
+       (reset! (:linear-tip resource) vs)
+       vs))))
 (defn flush-write-buffer-async!
   "Flush pending vectors to konserve asynchronously.
    Fires async k/assoc and adds channel to pending-writes.
@@ -714,29 +746,183 @@
   [^VectorStore vs]
   (sync! vs))
 
-(defn close!
-  "Close the store and release resources.
-   Calls sync! first to ensure all writes are committed.
-   Closes the Arena to unmap MemorySegment and release file mapping.
-   Returns a channel that delivers nil when cleanup is complete.
-   Clojure callers can ignore the channel (fire-and-forget).
-   Java close() blocks on the channel for proper resource cleanup."
+(defn mark-mmap-disposable!
+  "Delete this lineage's local mmap cache after its final handle closes.
+
+   Generation caches use this after opening a caller-named file. Native branch
+   caches remain reusable and are therefore not marked."
   [^VectorStore vs]
-  ;; Fire sync and cleanup asynchronously
-  (a/go
-    (a/<! (sync! vs))
-    ;; Close arena to unmap MemorySegment (must be done before deleting file)
-    (when-let [arena (:arena vs)]
-      (.close arena))
-    ;; Clean up the temp file, but only one we generated ourselves. This used
-    ;; to test whether the path started with java.io.tmpdir, which matches any
-    ;; caller-supplied :mmap-dir under /tmp and deleted the caller's branch
-    ;; files behind their back - asynchronously, so it also raced whatever they
-    ;; did next with that branch. A caller-supplied file is a cache meant to be
-    ;; reused on the next open; it is not ours to remove.
-    (when (:owns-mmap-file? vs)
-      (java.nio.file.Files/deleteIfExists (.toPath (File. ^String (:mmap-path vs)))))
+  (reset! (:delete-on-last? (:mmap-resource vs)) true)
+  vs)
+
+(defn- retain-mmap-resource!
+  [^MmapResource resource]
+  (locking resource
+    (when @(:closed? resource)
+      (throw (ex-info "The vector mmap resource is closed"
+                      {:reason :vector-mmap-closed
+                       :mmap-path (:mmap-path resource)})))
+    (swap! (:refs resource) inc))
+  resource)
+
+(defn- release-mmap-resource!
+  [^MmapResource resource]
+  (locking resource
+    (let [remaining (swap! (:refs resource) dec)]
+      (when (neg? remaining)
+        (throw (IllegalStateException. "Vector mmap resource reference underflow")))
+      (when (and (zero? remaining)
+                 (compare-and-set! (:closed? resource) false true))
+        (.close ^Arena (:arena resource))
+        (when @(:delete-on-last? resource)
+          (java.nio.file.Files/deleteIfExists
+           (.toPath (File. ^String (:mmap-path resource))))))))
+  nil)
+
+(defn- nearest-open-linear-parent
+  [^VectorStore vs]
+  (loop [candidate (:linear-parent vs)]
+    (cond
+      (nil? candidate) nil
+      (nil? @(:close-result candidate)) candidate
+      :else (recur (:linear-parent candidate)))))
+
+(defn- release-linear-tip!
+  [^VectorStore vs]
+  (let [resource (:mmap-resource vs)]
+    (locking resource
+      (when (identical? vs @(:linear-tip resource))
+        (reset! (:linear-tip resource) (nearest-open-linear-parent vs)))))
+  nil)
+
+(defn fork-linear-store!
+  "Create a zero-copy append-only child of a sealed VectorStore.
+
+   Parent and child share one contiguous mmap mapping, but have independent
+   logical counts, chunk roots, pending writes, and close lifecycles. Only one
+   live child may derive from a particular handle: two children would allocate
+   the same next vector slot. A child may itself derive another child, forming
+   the linear generation chain used by embedding databases. True branch forks
+   continue to use an independent mmap copy through Forkable."
+  [^VectorStore parent]
+  (locking parent
+    (when @(:close-result parent)
+      (throw (ex-info "Cannot derive from a closing vector store"
+                      {:reason :vector-store-closing})))
+    (let [resource (:mmap-resource parent)]
+      (locking resource
+        (when-not (identical? parent @(:linear-tip resource))
+          (throw (ex-info "This vector generation is not the current linear tip"
+                          {:reason :linear-generation-already-derived
+                           :mmap-path (:mmap-path parent)})))
+        (retain-mmap-resource! resource)
+        (try
+          (let [child
+                (->VectorStore
+                 (:store parent)
+                 (:dim parent)
+                 (:chunk-size parent)
+                 (atom @(:count-atom parent))
+                 (atom [])
+                 (atom #{})
+                 (:mmap-path parent)
+                 false
+                 (:mmap-buf parent)
+                 (:mem-segment parent)
+                 (:arena parent)
+                 (:capacity parent)
+                 (:crypto-hash? parent)
+                 (when (:crypto-hash? parent) (atom @(:commit-hash parent)))
+                 (when (:crypto-hash? parent) (atom []))
+                 (atom @(:chunk-address-map parent))
+                 (atom nil)
+                 (atom 0)
+                 (atom false)
+                 resource
+                 parent)]
+            (reset! (:linear-tip resource) child)
+            child)
+          (catch Throwable failure
+            (release-mmap-resource! resource)
+            (throw failure)))))))
+
+(defn- start-cleanup-if-ready!
+  [^VectorStore vs]
+  (let [result @(:close-result vs)]
+    (when (and result
+               (zero? @(:active-leases vs))
+               (compare-and-set! (:cleanup-started? vs) false true))
+      (a/go
+        (let [failure (atom nil)]
+          (try
+            (let [sync-result (a/<! (sync! vs))]
+              (when (instance? Throwable sync-result)
+                (throw sync-result)))
+            (catch Throwable e
+              (reset! failure e)))
+          ;; The handle-local writer position and the shared native mapping
+          ;; must be released even when persistence failed. The failed handle
+          ;; is already closing and cannot safely be retried.
+          (try
+            (release-linear-tip! vs)
+            (release-mmap-resource! (:mmap-resource vs))
+            (catch Throwable e
+              (when-not @failure
+                (reset! failure e))))
+          (let [outcome @failure]
+            (when outcome
+              (a/>! result outcome))
+            (a/close! result)))))
     nil))
+
+(defn acquire-lease!
+  "Pin this store's MemorySegment until the returned Runnable is run.
+
+   Acquisition fails once close! has published its close request. Release is
+   idempotent and may trigger deferred cleanup when it drops the last lease."
+  ^Runnable [^VectorStore vs]
+  (locking vs
+    (when @(:close-result vs)
+      (throw (ex-info "Vector store is closing"
+                      {:reason :vector-store-closing})))
+    (swap! (:active-leases vs) inc))
+  (let [released? (atom false)]
+    (reify Runnable
+      (run [_]
+        (when (compare-and-set! released? false true)
+          (locking vs
+            (let [remaining (swap! (:active-leases vs) dec)]
+              (when (neg? remaining)
+                (throw (IllegalStateException. "Vector store lease underflow")))))
+          (start-cleanup-if-ready! vs))))))
+
+(defn active-lease-count
+  "Number of active native readers pinning the store's Arena."
+  ^long [^VectorStore vs]
+  @(:active-leases vs))
+
+(defn close!
+  "Close the store and release resources after active native readers finish.
+
+   Calls sync! first and releases this handle's mmap reference. The final
+   lineage handle closes the Arena and removes a disposable mmap cache. The
+   returned promise channel completes only after both cursor leases and cleanup
+   complete. Repeated calls share that one completion."
+  [^VectorStore vs]
+  ;; Several immutable index values can share one VectorStore. Publish one
+  ;; promise channel with CAS; every caller observes the same completion.
+  (locking vs
+    ;; Use the same lifecycle monitor as acquire-lease!: publishing close and
+    ;; observing the lease count must be atomic with a reader's check+increment,
+    ;; otherwise cleanup can close the Arena in that gap.
+    (let [close-result (:close-result vs)
+          result (or @close-result
+                     (let [candidate (a/promise-chan)]
+                       (if (compare-and-set! close-result nil candidate)
+                         candidate
+                         @close-result)))]
+      (start-cleanup-if-ready! vs)
+      result)))
 
 (defn get-segment
   "Get the MemorySegment for direct SIMD access."

@@ -43,6 +43,7 @@
    [proximum.protocols :as p]
    ;; Implementation namespaces - required for emit-api macro resolution
    [proximum.api-impl]
+   [proximum.candidates :as candidates]
    [proximum.compaction]
    [proximum.crypto]
    [proximum.gc]
@@ -69,3 +70,10 @@
 ;; =============================================================================
 
 (codegen/emit-api proximum.specification/api-specification)
+
+;; Candidate scans intentionally sit outside the generated CRUD specification:
+;; their immutable cursor is a local integration primitive and is not suitable
+;; for automatic HTTP serialization.
+(def start-candidate-scan candidates/start-candidate-scan)
+(def candidate-page candidates/candidate-page)
+(def close-candidate-scan! candidates/close-candidate-scan!)

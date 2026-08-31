@@ -765,8 +765,19 @@ Remove unreachable commits and branches:
 ;; GC unreferenced data
 (def deleted-keys (prox/gc! idx))
 
+;; An embedding owner may publish immutable generations without native
+;; Proximum branches. Supply the COMPLETE retained set on every collection.
+(def deleted-detached
+  (prox/gc! idx (java.util.Date. 0)
+            {:generation-ids #{datahike-generation-id archived-generation-id}}))
+
 (println "Freed" (count deleted-keys) "keys")
 ```
+
+GC refuses a detached-only store when `:generation-ids` is empty. Proximum
+cannot infer roots held by another database, and omitting a retained generation
+would make it collectable. A missing generation or an error while traversing
+its storage roots aborts the sweep rather than using a partial mark set.
 
 **What GC does:**
 - Removes commits with no branch pointing to them

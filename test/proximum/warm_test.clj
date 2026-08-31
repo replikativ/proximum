@@ -60,14 +60,17 @@
       (let [serial   (core/load store :mmap-dir mmap :fetch-width 1)
             s-edges  (.countEdges ^PersistentEdgeIndex (p/edge-storage serial))
             s-entry  (.getEntrypoint ^PersistentEdgeIndex (p/edge-storage serial))
-            s-hits   (mapv :id (core/search serial q 10 {:ef 50}))
+            ;; Explore the complete small graph. At a finite ANN breadth even a
+            ;; query copied from the corpus is not contractually guaranteed to
+            ;; find itself, which made this restore-equivalence test random.
+            s-hits   (mapv :id (core/search serial q 10 {:ef 300}))
             _        (a/<!! (core/close! serial))
             ;; a DIFFERENT mmap dir, so the parallel load cannot inherit the
             ;; serial load's materialized cache and pass by reuse
             parallel (core/load store :mmap-dir (str base "/mmap2") :fetch-width 64)
             p-edges  (.countEdges ^PersistentEdgeIndex (p/edge-storage parallel))
             p-entry  (.getEntrypoint ^PersistentEdgeIndex (p/edge-storage parallel))
-            p-hits   (mapv :id (core/search parallel q 10 {:ef 50}))]
+            p-hits   (mapv :id (core/search parallel q 10 {:ef 300}))]
         (is (pos? s-edges) "the fixture actually built a graph")
         (is (= s-edges p-edges) "same edge count")
         (is (= s-entry p-entry) "same entrypoint")

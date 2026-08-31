@@ -1,5 +1,9 @@
 {:paths ["src" "src-java" "resources" "target/classes"]
 
+ :deps/prep-lib {:ensure "target/classes/proximum/internal/ArrayBitSet.class"
+                 :alias :build
+                 :fn compile-java}
+
  ;; For Maven Central deployment, use published dependencies:
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
         org.replikativ/persistent-sorted-set {:mvn/version "0.5.142"}

@@ -443,7 +443,7 @@ public class ProximumVectorStore implements AutoCloseable {
     /**
      * Load an existing index from storage.
      * Loads the latest commit from the specified branch (default: :main).
-     * 
+     *
      * Example:
      *   (load {:backend :file :path "/data/idx" :id #uuid "..."} {:branch :main})
      */
@@ -466,7 +466,7 @@ public class ProximumVectorStore implements AutoCloseable {
 
     /**
      * Load a historical commit by ID (time-travel query).
-     * 
+     *
      * Example:
      *   (load-commit store-config #uuid "550e8400-..." {:branch :main})
      */
@@ -479,7 +479,7 @@ public class ProximumVectorStore implements AutoCloseable {
     /**
      * Create a new vector index with the given configuration.
      * Dispatches on :type to create appropriate index implementation.
-     * 
+     *
      * Example:
      *   (create-index {:type :hnsw
      *                  :dim 128
@@ -511,7 +511,7 @@ public class ProximumVectorStore implements AutoCloseable {
     /**
      * Persist current state to durable storage, creating a commit.
      * Returns channel that delivers updated index when all pending writes complete.
-     * 
+     *
      * In Clojure: use <! in go-block or <!! to block.
      * In Java: returns CompletableFuture<ProximumVectorStore>.
      */
@@ -537,7 +537,7 @@ public class ProximumVectorStore implements AutoCloseable {
     /**
      * Search and include metadata in results.
      * Returns seq of {:id :distance :metadata}.
-     * 
+     *
      * Example:
      *   (search-with-metadata idx query 10)
      */
@@ -589,6 +589,12 @@ public class ProximumVectorStore implements AutoCloseable {
      * `remove-before` bounds HISTORY RETENTION — how far back commits stay
      * reachable. It is not the sweep's safety cutoff, which is derived from
      * konserve.gc-guard so a commit in flight is never collected.
+     *
+     * For immutable generations published by an embedding owner rather than a native
+     * Proximum branch, pass `{:generation-ids #{...}}` as the options map. It must be
+     * the COMPLETE set retained by that owner. A store with no native branches and no
+     * supplied generation ids is refused, and a missing generation or failed
+     * reachability traversal aborts before sweep.
      */
     public Set<Object> gc() {
         ensureInitialized();
@@ -642,11 +648,11 @@ public class ProximumVectorStore implements AutoCloseable {
     }
 
     /**
-     * Search with filtering predicate or ID set.
+     * Search with filtering predicate or iterable ID collection.
      * Filter can be:
      *   - (fn [id metadata] boolean) - predicate receives external ID
-     *   - Set of allowed external IDs
-     * 
+     *   - Iterable collection of allowed external IDs
+     *
      * Example:
      *   (search-filtered idx query 10 #{"doc-1" "doc-2"})
      */
@@ -670,7 +676,7 @@ public class ProximumVectorStore implements AutoCloseable {
      * Insert a vector with an ID and optional metadata. Returns new index.
      * ID can be any value (Long, String, UUID, etc.). Pass nil to auto-generate UUID.
      * This is a pure operation - no I/O until sync! is called.
-     * 
+     *
      * Example:
      *   (insert idx (float-array [1.0 2.0 3.0]) 123)
      *   (insert idx (float-array [1.0 2.0 3.0]) "doc-abc" {:category :science})
@@ -797,7 +803,7 @@ public class ProximumVectorStore implements AutoCloseable {
      * Search for k nearest neighbors.
      * Returns sequence of {:id :distance} sorted by distance (ascending).
      * IDs are external IDs as provided during insert.
-     * 
+     *
      * Example:
      *   (search idx query-vec 10 {:ef 100})
      */
@@ -835,7 +841,7 @@ public class ProximumVectorStore implements AutoCloseable {
 
     /**
      * Associate/update metadata for a vector. Returns new index.
-     * 
+     *
      * Example:
      *   (with-metadata idx "doc-123" {:category :science})
      */
@@ -921,7 +927,7 @@ public class ProximumVectorStore implements AutoCloseable {
      * Insert multiple vectors with IDs efficiently.
      * IDs list must match vectors list length. Use nil for auto-generated UUIDs.
      * Options: {:metadata [m1 m2 ...], :parallelism n}
-     * 
+     *
      * Example:
      *   (insert-batch idx [vec1 vec2] [id1 id2])
      *   (insert-batch idx [vec1 vec2] [nil nil] {:metadata [m1 m2]})
@@ -940,7 +946,7 @@ public class ProximumVectorStore implements AutoCloseable {
     /**
      * Persist current state to durable storage, creating a commit.
      * Returns channel that delivers updated index when all pending writes complete.
-     * 
+     *
      * In Clojure: use <! in go-block or <!! to block.
      * In Java: returns CompletableFuture<ProximumVectorStore>.
      */
@@ -966,7 +972,7 @@ public class ProximumVectorStore implements AutoCloseable {
     /**
      * Search and include metadata in results.
      * Returns seq of {:id :distance :metadata}.
-     * 
+     *
      * Example:
      *   (search-with-metadata idx query 10)
      */
@@ -987,6 +993,12 @@ public class ProximumVectorStore implements AutoCloseable {
      * `remove-before` bounds HISTORY RETENTION — how far back commits stay
      * reachable. It is not the sweep's safety cutoff, which is derived from
      * konserve.gc-guard so a commit in flight is never collected.
+     *
+     * For immutable generations published by an embedding owner rather than a native
+     * Proximum branch, pass `{:generation-ids #{...}}` as the options map. It must be
+     * the COMPLETE set retained by that owner. A store with no native branches and no
+     * supplied generation ids is refused, and a missing generation or failed
+     * reachability traversal aborts before sweep.
      */
     public Set<Object> gc(Object arg0, Map<String, Object> opts) {
         ensureInitialized();
@@ -994,11 +1006,11 @@ public class ProximumVectorStore implements AutoCloseable {
     }
 
     /**
-     * Search with filtering predicate or ID set.
+     * Search with filtering predicate or iterable ID collection.
      * Filter can be:
      *   - (fn [id metadata] boolean) - predicate receives external ID
-     *   - Set of allowed external IDs
-     * 
+     *   - Iterable collection of allowed external IDs
+     *
      * Example:
      *   (search-filtered idx query 10 #{"doc-1" "doc-2"})
      */
@@ -1013,7 +1025,7 @@ public class ProximumVectorStore implements AutoCloseable {
      * Insert a vector with an ID and optional metadata. Returns new index.
      * ID can be any value (Long, String, UUID, etc.). Pass nil to auto-generate UUID.
      * This is a pure operation - no I/O until sync! is called.
-     * 
+     *
      * Example:
      *   (insert idx (float-array [1.0 2.0 3.0]) 123)
      *   (insert idx (float-array [1.0 2.0 3.0]) "doc-abc" {:category :science})
@@ -1050,7 +1062,7 @@ public class ProximumVectorStore implements AutoCloseable {
      * Search for k nearest neighbors.
      * Returns sequence of {:id :distance} sorted by distance (ascending).
      * IDs are external IDs as provided during insert.
-     * 
+     *
      * Example:
      *   (search idx query-vec 10 {:ef 100})
      */
@@ -1074,7 +1086,7 @@ public class ProximumVectorStore implements AutoCloseable {
      * Insert multiple vectors with IDs efficiently.
      * IDs list must match vectors list length. Use nil for auto-generated UUIDs.
      * Options: {:metadata [m1 m2 ...], :parallelism n}
-     * 
+     *
      * Example:
      *   (insert-batch idx [vec1 vec2] [id1 id2])
      *   (insert-batch idx [vec1 vec2] [nil nil] {:metadata [m1 m2]})

@@ -395,10 +395,10 @@ Example:
     {:args [:=> [:cat VectorIndex Vector pos-int? :any [:? SearchOptions]]
             [:sequential SearchResult]]
      :ret  [:sequential SearchResult]
-     :doc  "Search with filtering predicate or ID set.
+     :doc  "Search with filtering predicate or iterable ID collection.
 Filter can be:
   - (fn [id metadata] boolean) - predicate receives external ID
-  - Set of allowed external IDs
+  - Iterable collection of allowed external IDs
 
 Example:
   (search-filtered idx query 10 #{\"doc-1\" \"doc-2\"})"
@@ -637,7 +637,13 @@ composes into async, and a future-returning method does not compose back into
 blocking without .get() and ExecutionException wrapping.
 `remove-before` bounds HISTORY RETENTION — how far back commits stay
 reachable. It is not the sweep's safety cutoff, which is derived from
-konserve.gc-guard so a commit in flight is never collected."
+konserve.gc-guard so a commit in flight is never collected.
+
+For immutable generations published by an embedding owner rather than a native
+Proximum branch, pass `{:generation-ids #{...}}` as the options map. It must be
+the COMPLETE set retained by that owner. A store with no native branches and no
+supplied generation ids is refused, and a missing generation or failed
+reachability traversal aborts before sweep."
      :impl proximum.gc/gc!
      :referentially-transparent? false
      :supports-remote? true}

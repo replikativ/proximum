@@ -262,7 +262,10 @@
   [doc-str]
   (when doc-str
     (let [lines (str/split-lines doc-str)
-          formatted (map #(str "     * " %) lines)]
+          formatted (map #(if (str/blank? %)
+                            "     *"
+                            (str "     * " %))
+                         lines)]
       (str "    /**\n"
            (str/join "\n" formatted)
            "\n     */"))))

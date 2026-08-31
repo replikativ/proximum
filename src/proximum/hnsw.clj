@@ -29,7 +29,8 @@
             [konserve.gc-guard :as guard]
             [konserve.protocols :as kp]
             [clojure.core.async :as a])
-  (:import [proximum.internal PersistentEdgeIndex HnswInsert HnswSearch ArrayBitSet]
+  (:import [proximum.internal PersistentEdgeIndex HnswInsert HnswSearch
+            HnswCandidateCursor ArrayBitSet]
            [java.lang.foreign MemorySegment]))
 
 ;; -----------------------------------------------------------------------------
@@ -826,7 +827,10 @@
            pes-edges (.-pes-edges idx)
            dim (.-dim idx)
            distance-type (.-distance-type idx)
-           ef (or (:ef opts) (* k 10))
+           ;; A filtered result heap cannot return more than `ef` admitted
+           ;; nodes. Keep the same ef>=k invariant as ordinary search even
+           ;; when a caller supplies a smaller session-level beam.
+           ef (max k (or (:ef opts) (* k 10)))
            float-arr (validate-float-array query dim distance-type)
            _ (ensure-cosine-indexable! float-arr distance-type :query)
            _ (when (= distance-type 1)
@@ -863,10 +867,20 @@
              (throw (ex-info "search-filtered requires a predicate fn, Set, or ArrayBitSet"
                              {:type (type pred-or-set)})))
 
-           ^doubles result (HnswSearch/searchFiltered seg pes-edges float-arr
-                                                      dim (int k) (int ef)
-                                                      bitset
-                                                      distance-type)]
+           filter-strategy (or (:filter-strategy opts) :hnsw)
+           _ (when-not (#{:hnsw :exact} filter-strategy)
+               (throw (ex-info ":filter-strategy must be :hnsw or :exact"
+                               {:reason :invalid-filter-strategy
+                                :filter-strategy filter-strategy})))
+           ^doubles result
+           (case filter-strategy
+             :exact
+             (HnswSearch/searchExactFiltered seg pes-edges float-arr dim
+                                             (int k) bitset distance-type n)
+             :hnsw
+             (HnswSearch/searchFiltered seg pes-edges float-arr
+                                        dim (int k) (int ef)
+                                        bitset distance-type))]
        (loop [i 0
               acc (transient [])]
          (if (< i (alength result))
@@ -922,6 +936,56 @@
     (let [vectors (.-vectors idx)]
       (- (vectors/capacity vectors)
          (vectors/count-vectors vectors)))))  ; Close first extend-type
+
+(extend-type HnswIndex
+  p/CandidateSearch
+  (start-candidate-search
+    [idx query opts]
+    (let [vectors (.-vectors idx)
+          pes-edges (.-pes-edges idx)
+          dim (.-dim idx)
+          distance-type (.-distance-type idx)
+          ef (max 1 (long (or (:ef opts) (:ef-search (.-state idx)) 50)))
+          float-arr (validate-float-array query dim distance-type)
+          _ (ensure-cosine-indexable! float-arr distance-type :query)
+          _ (when (= distance-type 1)
+              (HnswSearch/normalizeVector float-arr))
+          ^MemorySegment seg (vectors/get-segment vectors)
+          strict-order? (not= false (:strict-order? opts))
+          max-visited (long (or (:max-visited opts) 0))
+          max-distance-computations
+          (long (or (:max-distance-computations opts) 0))
+          timeout-nanos (long (if-let [timeout-ms (:timeout-ms opts)]
+                                (* 1000000 timeout-ms)
+                                0))
+          max-frontier-nodes (long (or (:max-frontier-nodes opts) 100000))
+          ^ArrayBitSet entity-filter (:entity-filter opts)
+          _ (doseq [[option value]
+                    [[:max-visited max-visited]
+                     [:max-distance-computations max-distance-computations]
+                     [:timeout-ms (long (or (:timeout-ms opts) 0))]
+                     [:max-frontier-nodes max-frontier-nodes]]]
+              (when (neg? value)
+                (throw (ex-info "Candidate-search budgets cannot be negative"
+                                {:reason :invalid-candidate-budget
+                                 :option option :value value}))))
+          _ (when (and (pos? max-frontier-nodes)
+                       (< max-frontier-nodes ef))
+              (throw (ex-info ":max-frontier-nodes must fit one ef-sized traversal batch"
+                              {:reason :invalid-candidate-budget
+                               :option :max-frontier-nodes
+                               :value max-frontier-nodes
+                               :ef ef})))
+          lease (vectors/acquire-lease! vectors)]
+      (try
+        (HnswCandidateCursor. seg pes-edges float-arr dim (int ef)
+                              distance-type strict-order?
+                              (int (vectors/count-vectors vectors))
+                              max-visited max-distance-computations
+                              timeout-nanos max-frontier-nodes entity-filter lease)
+        (catch Throwable failure
+          (.run ^Runnable lease)
+          (throw failure))))))
 
 ;; IndexLifecycle protocol implementation
 (extend-type HnswIndex
@@ -988,7 +1052,8 @@
     ([idx opts]
     ;; Sync the index to durable storage, creating a commit
     ;; See writing.clj for helper functions
-     (let [state (.-state idx)
+     (let [publish-branch? (get opts :publish-branch? true)
+           state (.-state idx)
            vs (.-vectors idx)
            edge-store (:edge-store state)
            pes (.-pes-edges idx)
@@ -996,7 +1061,11 @@
            crypto-hash? (:crypto-hash? state)
           ;; Read previous commit from storage (branch head), not in-memory state
           ;; This is correct even after mutations have invalidated the in-memory commit-id
-           prev-snapshot (when edge-store (k/get edge-store branch nil {:sync? true}))
+           prev-snapshot (when edge-store
+                           (if publish-branch?
+                             (k/get edge-store branch nil {:sync? true})
+                             (when-let [base-commit (:commit-id state)]
+                               (k/get edge-store base-commit nil {:sync? true}))))
            parent-commit-hash (when crypto-hash? (:commit-id prev-snapshot))
 
           ;; Refuse to write a commit that would move the branch somewhere its
@@ -1011,7 +1080,7 @@
           ;; here; so do we.
            restored-from (:restored-from-commit state)
            head-commit (:commit-id prev-snapshot)
-           _ (when (and restored-from head-commit (not= restored-from head-commit))
+           _ (when (and publish-branch? restored-from head-commit (not= restored-from head-commit))
                (throw (ex-info "Refusing to sync: this index is not at the branch head"
                                {:branch branch
                                 :index-restored-from restored-from
@@ -1153,8 +1222,13 @@
                                                      (writing/generate-commit-id false nil))
                                          snapshot (assoc base-snapshot :commit-id commit-id)]
 
-                 ;; Write commit entry and branch head using helper
-                                     (writing/write-commit! edge-store commit-id branch snapshot)
+                 ;; A native commit publishes through its branch head.  An
+                 ;; embedded owner (Datahike, a Yggdrasil composite, ...) only
+                 ;; needs the immutable generation: its own root is the sole
+                 ;; visibility gate.
+                                     (if publish-branch?
+                                       (writing/write-commit! edge-store commit-id branch snapshot)
+                                       (writing/write-generation! edge-store commit-id snapshot))
 
                  ;; Stamp the mmap with the commit its contents now correspond
                  ;; to, so the next open can tell this cache apart from one left
@@ -1199,8 +1273,10 @@
 
                ;; No storage - just return index with updated address-map
                                  (update-hnsw-index idx {:address-map new-address-map})))
-                             (catch Exception e
-                               (throw e))))]
+                             (catch Throwable e
+                               (if (:return-errors? opts)
+                                 e
+                                 (throw e)))))]
          result-chan))))
 
   (close! [idx]
@@ -1349,14 +1425,15 @@
 (defmethod p/create-index :hnsw
   [{:keys [dim M ef-construction ef-search distance capacity
            max-levels chunk-size cache-size branch crypto-hash?
-           seed store store-config mmap-dir mmap-path]
+           seed store store-config mmap-dir mmap-path register-branch?]
     :or {M 16
          distance :euclidean
          max-levels nil
          chunk-size 1000
          cache-size 10000
          branch :main
-         crypto-hash? false}}]
+         crypto-hash? false
+         register-branch? true}}]
   (when-not dim
     (throw (ex-info ":dim is required" {})))
   ;; Checked here rather than at first insert: the seed is written into the
@@ -1398,15 +1475,16 @@
                               (.exists (java.io.File. ^String mmap-dir)))
                      (vectors/test-reflink-support mmap-dir))
         _ (when (false? reflink-ok)
-            (log/warn :proximum/connect "Filesystem does not support reflink (copy-on-write)"
-                      {:hint "Branch operations will use full file copies. Consider Btrfs, XFS, or ZFS for O(1) branching."
-                       :mmap-dir mmap-dir}))
+            ;; A normal capability result, not a correctness failure. This runs
+            ;; for every generation open and overwhelmed test/REPL output on
+            ;; ext4. Callers can inspect `reflink-supported?`; keep the detail
+            ;; at debug level for diagnostics.
+            (log/debug :proximum/connect "Filesystem does not support reflink (copy-on-write)"
+                       {:hint "Branch operations will use full file copies. Use a filesystem where the runtime reflink probe succeeds for O(1) branching."
+                        :mmap-dir mmap-dir}))
         actual-mmap-path (or mmap-path
                              (when mmap-dir (vectors/branch-mmap-path mmap-dir branch)))
-        ;; Write global immutable config (includes :index-type for restore-index dispatch)
-        _ (when base-store
-            (k/assoc base-store :index/config
-                     {:index-type :hnsw  ;; NEW: for restore-index dispatch
+        index-config {:index-type :hnsw
                       :dim dim
                       :M M
                       :M0 M0
@@ -1417,19 +1495,40 @@
                       :crypto-hash? crypto-hash?
                       ;; Construction parameters belong here, not in the branch
                       ;; snapshot: they are immutable for the life of the index
-                      ;; and every insert depends on them. restore-index used to
-                      ;; read them from the snapshot, which never carried them,
-                      ;; so a reloaded index silently switched to ml=0.36067 and
-                      ;; ef-construction=200 whatever it was built with.
+                      ;; and every insert depends on them.
                       :ml ml
                       :ef-construction ef-c
                       :ef-search ef-s
-                      ;; Immutable like the rest of this map: the seed governs
-                      ;; level assignment, so changing it after the fact would
-                      ;; make later inserts inconsistent with earlier ones.
+                      ;; The seed governs level assignment, so changing it after
+                      ;; the fact makes later inserts inconsistent with earlier
+                      ;; ones.
                       :seed seed}
-                     {:sync? true}))
+        ;; Initialize the store-wide config atomically and refuse drift. `update`
+        ;; is intentional: two bootstraps may both observe an empty store, and a
+        ;; read followed by `assoc` would let the last incompatible writer win.
         _ (when base-store
+            (k/update
+             base-store :index/config
+             (fn [stored]
+               (cond
+                 (nil? stored) index-config
+                 (= stored index-config) stored
+                 :else
+                 (throw
+                  (ex-info
+                   "Index creation conflicts with this store's immutable index config"
+                   {:reason :index-config-conflict
+                    :stored stored
+                    :requested index-config
+                    :conflicting-keys
+                    (into #{}
+                          (keep (fn [key]
+                                  (when (not= (get stored key ::missing)
+                                              (get index-config key ::missing))
+                                    key)))
+                          (into (set (keys stored)) (keys index-config)))}))))
+             {:sync? true}))
+        _ (when (and base-store register-branch?)
             (k/update base-store :branches #(conj (or % #{}) branch) {:sync? true}))
         pss-store (storage/create-storage base-store {:cache-size cache-size
                                                       :crypto-hash? crypto-hash?})

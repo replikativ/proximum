@@ -8,7 +8,7 @@
             [clojure.set :as set]
             [clojure.core.async :as a])
   (:import [java.io File]
-           [proximum.internal PersistentEdgeIndex Distance]))
+           [proximum.internal ArrayBitSet PersistentEdgeIndex Distance]))
 
 (def ^:dynamic *store-id* nil)
 
@@ -17,6 +17,28 @@
     (f)))
 
 (use-fixtures :each with-store-id-fixture)
+
+(deftest sparse-array-bitset-iteration-test
+  (let [^ArrayBitSet bitset (ArrayBitSet. 100000000)]
+    (doseq [id [7 70000003 99999999]]
+      (.add bitset id))
+    ;; Cardinality and successor lookup are maintained from the non-empty
+    ;; words, rather than rescanning 3.1 million backing words per query.
+    (is (= 3 (.cardinality bitset)))
+    (is (= 7 (.nextSetBit bitset 0)))
+    (is (= 70000003 (.nextSetBit bitset 8)))
+    (is (= 99999999 (.nextSetBit bitset 70000004)))
+    (is (= -1 (.nextSetBit bitset 100000000)))
+    (.add bitset 7)
+    (is (= 3 (.cardinality bitset)) "duplicate adds do not inflate cardinality")
+    (.remove bitset 70000003)
+    (is (= 2 (.cardinality bitset)))
+    (is (= 99999999 (.nextSetBit bitset 8)))
+    (let [^ArrayBitSet copy (.clone bitset)]
+      (.clear bitset)
+      (is (zero? (.cardinality bitset)))
+      (is (= [7 99999999]
+             [(.nextSetBit copy 0) (.nextSetBit copy 8)])))))
 
 (defn file-store-config
   ([path]
@@ -551,9 +573,53 @@
 
           (a/<!! (core/close! idx2))))
 
+      (testing "iterable filters preserve 64-bit external IDs without a boxed set"
+        (let [high-id (inc (bit-shift-left 1 32))
+              target (random-vec 32)
+              idx (create-test-index {:type :hnsw
+                                      :dim 32
+                                      :M 8
+                                      :ef-construction 50
+                                      :vectors-path (str path "-iterable")
+                                      :capacity 100})
+              idx (core/insert idx (random-vec 32) 1)
+              idx (core/insert idx target high-id)
+              ;; A lazy sequence is the shape Datahike exposes over its
+              ;; Roaring64 entity filter.
+              allowed (map identity [high-id])
+              results (core/search-filtered idx target 1 allowed {:ef 50})]
+          (is (= [high-id] (mapv :id results)))
+          (a/<!! (core/close! idx))))
+
+      (testing "exact filtered strategy has complete stable top-k recall"
+        (let [idx (create-test-index {:type :hnsw
+                                      :dim 2
+                                      :M 8
+                                      :ef-construction 50
+                                      :vectors-path (str path "-exact")
+                                      :capacity 100})
+              idx (core/insert-batch
+                   idx
+                   (mapv #(float-array [(float %) 0.0]) (range 20))
+                   (range 20))
+              results (core/search-filtered
+                       idx (float-array [7.25 0.0]) 4
+                       [1 5 7 8 12 19]
+                       {:filter-strategy :exact})]
+          (is (= [7 8 5 12] (mapv :id results)))
+          (is (apply <= (map :distance results)))
+          (is (= 6
+                 (count (core/search-filtered
+                         idx (float-array [7.25 0.0]) 6 (range 20)
+                         {:ef 2 :filter-strategy :hnsw})))
+              "an explicit ef below k cannot cap the filtered result heap")
+          (a/<!! (core/close! idx))))
+
       (finally
         (cleanup path)
-        (cleanup (str path "-set"))))))
+        (cleanup (str path "-set"))
+        (cleanup (str path "-iterable"))
+        (cleanup (str path "-exact"))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Fork performance tests

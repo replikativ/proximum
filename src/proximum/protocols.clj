@@ -71,6 +71,17 @@
      pred-fn: (fn [external-id metadata] boolean) - return true to include.
      Returns seq of {:id external-id :distance float}."))
 
+(defprotocol CandidateSearch
+  "Optional internal protocol for generation-pinned, resumable ANN traversal.
+
+   Unlike `search`, the returned cursor retains its visited set and graph
+   frontier. Implementations may therefore discover additional candidates when
+   a primary-store predicate rejects an earlier page. An implementation that
+   accepts `:entity-filter` must use it as the candidate universe while still
+   allowing traversal through excluded graph nodes."
+  (start-candidate-search [idx query opts]
+    "Start a mutable, single-consumer candidate cursor for immutable `idx`."))
+
 ;; -----------------------------------------------------------------------------
 ;; IndexLifecycle Protocol - Lifecycle management
 
