@@ -93,6 +93,16 @@ jobs:
       - store_test_results:
           path: target/test-results
 
+  backward-compatibility:
+    executor: clojure-java22
+    steps:
+      - attach_workspace:
+          at: ~/
+      - install-clojure
+      - run:
+          name: Open the latest release with current code
+          command: bash scripts/backward-compatibility.sh
+
   test-java-api:
     executor: clojure-java22
     steps:
@@ -204,6 +214,9 @@ workflows:
           requires:
             - build
             - format
+      - backward-compatibility:
+          requires:
+            - setup
       - test-java-api:
           requires:
             - build
