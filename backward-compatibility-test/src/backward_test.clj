@@ -1,4 +1,5 @@
 (ns backward-test
+  "Cross-release persistence fixture; loaded only by the compatibility script."
   (:require [clojure.core.async :as async]
             [proximum.core :as proximum]))
 
@@ -14,12 +15,12 @@
   (str (System/getenv "BACK_COMPAT_ROOT") "/"
        (System/getenv "BACK_COMPAT_MMAP")))
 
-(defn- floats [x y z w]
+(defn- f32s [x y z w]
   (float-array [(float x) (float y) (float z) (float w)]))
 
 (def ^:private base-vectors
-  [["north" (floats 1 0 0 0)]
-   ["east" (floats 0 1 0 0)]])
+  [["north" (f32s 1 0 0 0)]
+   ["east" (f32s 0 1 0 0)]])
 
 (defn- add-vectors [index entries]
   (reduce (fn [current [id vector]]
@@ -37,7 +38,7 @@
         feature-base (proximum/branch! main :feature)
         feature (async/<!! (proximum/sync!
                             (proximum/insert feature-base
-                                             (floats 0 0 1 0)
+                                             (f32s 0 0 1 0)
                                              "feature"
                                              {:source "release"})))]
     (proximum/close! feature)
@@ -53,7 +54,7 @@
       (assert (nil? (proximum/get-vector main "feature")))
       (assert (some? (proximum/get-vector feature "feature")))
       (let [updated (proximum/insert main
-                                     (floats 0 0 0 1)
+                                     (f32s 0 0 0 1)
                                      "current"
                                      {:source "current"})
             synced (async/<!! (proximum/sync! updated))]
