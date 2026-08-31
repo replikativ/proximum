@@ -1,16 +1,15 @@
 (ns proximum.generations
   "Branch-free immutable generations for embedding Proximum in another owner.
 
-   A generation builder owns a private mmap and graph.  Sealing writes an
+   A generation builder owns private logical vector and graph state. Sealing writes an
    immutable commit entry but never updates `:main`, another native branch head,
    or the native branch registry.  The embedding owner records the returned id
    in its own durable root and then calls `rooted!`; until then a Konserve GC
    guard protects all unreferenced writes made by the builder.
 
-   This first implementation copies the source mmap.  Reflink-capable filesystems
-   make that copy-on-write; other filesystems pay a full-file copy.  The cost is
-   explicit and is why this API is a correctness foundation, not yet the final
-   high-throughput Datahike adapter."
+   Linear descendants share the source's append-only mmap cache while retaining
+   independent logical counts, durable chunk roots, graphs, and close lifetimes.
+   Only true branch divergence copies the mmap."
   (:require [clojure.core.async :as a]
             [konserve.core :as k]
             [konserve.gc-guard :as guard]
@@ -23,9 +22,7 @@
             [proximum.storage :as storage]
             [proximum.vectors :as vectors]
             [proximum.writing :as writing])
-  (:import [java.io File]
-           [java.lang.ref Cleaner Cleaner$Cleanable]
-           [java.nio.file Files]
+  (:import [java.lang.ref Cleaner Cleaner$Cleanable]
            [proximum.internal PersistentEdgeIndex]))
 
 (defrecord GenerationBuilder
@@ -54,8 +51,7 @@
         (try
           (let [result (a/<!! (p/close! (:index resource)))]
             (when (instance? Throwable result)
-              (throw result))
-            (Files/deleteIfExists (.toPath (File. ^String (:mmap-path resource)))))
+              (throw result)))
           (finally
             ;; Native close is not safely retryable after partial progress.
             ;; A failed close may leave the disposable cache file behind, but
@@ -118,10 +114,9 @@
       (throw (ex-info "The source generation does not exist in storage"
                       {:reason :generation-not-found
                        :generation-id commit-id})))
-    ;; HnswIndex values currently share their append-only VectorStore with
-    ;; descendants.  A descendant insert can therefore change the physical mmap
-    ;; and write queues while this source still reports its old logical roots.
-    ;; Refuse such a handle rather than copying an incoherent working file.
+    ;; Legacy persistent HnswIndex values can share one mutable VectorStore.
+    ;; Refuse such a contaminated handle. Generation descendants instead get a
+    ;; distinct logical VectorStore handle over a ref-counted mmap resource.
     (when (or (not= state-count physical-count)
               (not= state-count (:branch-vector-count snapshot))
               (pos? pending-vectors)
@@ -158,15 +153,18 @@
     (when-not store-id
       (throw (ex-info "Generation builders require a stable Konserve store id"
                       {:reason :generation-requires-store-id})))
-    ;; Append and copy synchronize on VectorStore.  Holding that monitor across
-    ;; validation and the filesystem copy closes the check/copy race.
+    ;; Validation and zero-copy derivation synchronize on VectorStore, closing
+    ;; the gap in which a legacy descendant could mutate the source handle.
     (locking (p/vector-storage source)
       (source-snapshot! source)
       (let [source-id (p/current-commit source)
             workspace-id (keyword "proximum.generation" (str (random-uuid)))
-            token (guard/writing! store-id)]
+            token (guard/writing! store-id)
+            forked-vectors* (atom nil)]
         (try
-          (let [forked-vectors (p/fork-vector-storage source workspace-id)
+          (let [forked-vectors (vectors/fork-linear-store!
+                                (p/vector-storage source))
+                _ (reset! forked-vectors* forked-vectors)
                 forked-graph (p/fork-graph-storage source)
                 private-index (p/assemble-forked-index
                                source forked-vectors forked-graph
@@ -175,6 +173,8 @@
              (atom private-index) source-id workspace-id
              (:mmap-path forked-vectors) store-id token (atom :open) (atom false)))
           (catch Throwable e
+            (when-let [forked-vectors @forked-vectors*]
+              (a/<!! (vectors/close! forked-vectors)))
             (guard/done! store-id token)
             (throw e)))))))
 
@@ -230,9 +230,9 @@
    configuration needed to reopen a sealed generation.  The GC guard is held
    before that write and remains held until `rooted!` or `discard!`.
 
-   This is the efficient empty/bootstrap case.  Continuing from an existing
-   generation still copies its full mmap when filesystem reflinks are
-   unavailable; this API deliberately does not implement a delta overlay.
+   Continuing from an existing generation shares its append-only mmap cache
+   along one linear chain. Independent historical opens still use private
+   caches, and native branch divergence still uses an independent mmap copy.
 
    Required config keys are the ordinary HNSW creation keys plus `:mmap-dir`
    and either `:store` or `:store-config`. An embedding owner can pass its own
@@ -298,7 +298,9 @@
                      (assoc :store raw-store
                             :branch workspace-id
                             :register-branch? false)))
-                mmap-path (:mmap-path (p/vector-storage private-index))]
+                vector-store (p/vector-storage private-index)
+                _ (vectors/mark-mmap-disposable! vector-store)
+                mmap-path (:mmap-path vector-store)]
             (->GenerationBuilder
              (atom private-index) nil workspace-id mmap-path
              store-id token (atom :open) (atom false)))
@@ -551,6 +553,7 @@
                                  :store raw-store
                                  :mmap-dir mmap-dir
                                  :mmap-path mmap-path)
+        _ (vectors/mark-mmap-disposable! (p/vector-storage idx))
         resource (->GenerationViewResource idx (p/current-commit idx) mmap-path
                                            (kp/store-id raw-store)
                                            (atom 1) (atom false))]
@@ -575,13 +578,16 @@
     (generation-view-lease resource)))
 
 (defn close-view!
-  "Close a generation/view and delete its private mmap cache.
+  "Close a generation/view and release its mmap-cache reference.
+
+   A private historical cache is deleted with its final reference. A linear
+   descendant of a native branch shares that branch's reusable cache, so closing
+   the generation does not delete the branch cache.
 
    A sealed-but-unrooted generation must first be acknowledged with `rooted!`
    or abandoned with `discard!`."
   [generation]
   (let [idx (:index generation)
-        mmap-path (:mmap-path generation)
         closed? (:closed? generation)]
     (when (and (instance? SealedGeneration generation)
                (= :sealed-unrooted @(:status generation))
@@ -603,7 +609,6 @@
       (compare-and-set! closed? false true)
       (a/go
         (a/<! (p/close! idx))
-        (Files/deleteIfExists (.toPath (File. ^String mmap-path)))
         nil)
 
       :else
@@ -629,6 +634,5 @@
       (if (compare-and-set! closed? false true)
         (a/go
           (a/<! (p/close! idx))
-          (Files/deleteIfExists (.toPath (File. ^String (:mmap-path generation))))
           nil)
         (doto (a/chan) a/close!)))))

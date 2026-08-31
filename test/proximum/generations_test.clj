@@ -227,7 +227,7 @@
         builder (generations/begin-generation source)]
     (try
       (generations/put! builder :new (float-array [1.0 0.0]) {:kind :new})
-      (testing "the private builder does not mutate its source query or mmap"
+      (testing "the private builder does not mutate its source's logical state"
         (is (nil? (core/get-vector source :new)))
         (is (not (identical? (p/vector-storage source)
                              (p/vector-storage (generations/builder-index builder)))))
@@ -270,6 +270,154 @@
             (a/<!! (generations/close-view! opened))
             (a/<!! (generations/close-view! sealed)))))
       (finally
+        (a/<!! (p/close! source))
+        (delete-tree! dir)))))
+
+(deftest linear-generation-derivation-is-zero-copy-and-exclusive
+  (let [dir (temp-dir)
+        source (source-index dir)
+        builder* (atom nil)]
+    (try
+      (let [builder (generations/begin-generation source)
+            _ (reset! builder* builder)
+            source-vectors (p/vector-storage source)
+            child-vectors (p/vector-storage (generations/builder-index builder))]
+        (is (not (identical? source-vectors child-vectors))
+            "logical writer state is never shared")
+        (is (identical? (:mmap-resource source-vectors)
+                        (:mmap-resource child-vectors))
+            "one linear descendant shares the contiguous local cache")
+        (is (= (:mmap-path source-vectors) (:mmap-path child-vectors)))
+        (generations/put! builder :child (float-array [1.0 0.0]))
+        (is (nil? (core/get-vector source :child)))
+        (is (= :linear-generation-already-derived
+               (try
+                 (generations/begin-generation source)
+                 nil
+                 (catch clojure.lang.ExceptionInfo failure
+                   (:reason (ex-data failure))))))
+        (a/<!! (generations/discard! builder))
+        (reset! builder* nil)
+
+        (testing "discard releases the source reservation"
+          (let [replacement (generations/begin-generation source)]
+            (reset! builder* replacement)
+            (generations/put! replacement :replacement
+                              (float-array [2.0 0.0]))
+            (is (= [2.0 0.0]
+                   (vec (core/get-vector
+                         (generations/builder-index replacement)
+                         :replacement)))))))
+      (finally
+        (when @builder*
+          (a/<!! (generations/discard! @builder*)))
+        (a/<!! (p/close! source))
+        (delete-tree! dir)))))
+
+(deftest linear-generation-chain-retains-cache-until-final-descendant-closes
+  (let [dir (temp-dir)
+        source (source-index dir)
+        first* (atom nil)
+        second* (atom nil)]
+    (try
+      (let [first-builder (generations/begin-generation source)
+            _ (generations/put! first-builder :first (float-array [1.0 0.0]))
+            first (generations/seal! first-builder)
+            _ (reset! first* first)
+            _ (generations/rooted! first)
+            second-builder (generations/begin-generation
+                            (generations/generation-index first))
+            _ (generations/put! second-builder :second (float-array [2.0 0.0]))
+            second (generations/seal! second-builder)
+            _ (reset! second* second)
+            _ (generations/rooted! second)
+            resource (:mmap-resource
+                      (p/vector-storage (generations/generation-index second)))]
+        (is (= 3 @(:refs resource)))
+        (is (nil? (core/get-vector source :first)))
+        (is (nil? (core/get-vector
+                   (generations/generation-index first) :second)))
+
+        ;; Closing an intermediate ancestor cannot invalidate the final
+        ;; descendant or make an older ancestor eligible to fork into the same
+        ;; suffix. Each logical generation contributes one resource ref.
+        (a/<!! (generations/close-view! first))
+        (reset! first* nil)
+        (is (= 2 @(:refs resource)))
+        (is (= :linear-generation-already-derived
+               (try
+                 (generations/begin-generation source)
+                 nil
+                 (catch clojure.lang.ExceptionInfo failure
+                   (:reason (ex-data failure))))))
+        (is (= [1.0 0.0]
+               (vec (core/get-vector
+                     (generations/generation-index second) :first))))
+        (is (= [2.0 0.0]
+               (vec (core/get-vector
+                     (generations/generation-index second) :second))))
+
+        (a/<!! (generations/close-view! second))
+        (reset! second* nil)
+        (is (= 1 @(:refs resource)))
+        (testing "closing the final descendant rolls the tip back past closed ancestors"
+          (let [replacement (generations/begin-generation source)]
+            (a/<!! (generations/discard! replacement)))))
+      (finally
+        (when @second*
+          (a/<!! (generations/close-view! @second*)))
+        (when @first*
+          (a/<!! (generations/close-view! @first*)))
+        (a/<!! (p/close! source))
+        (delete-tree! dir)))))
+
+(deftest reused-linear-cache-does-not-change-durable-history
+  (let [dir (temp-dir)
+        source (source-index dir)
+        first* (atom nil)
+        replacement* (atom nil)
+        opened-first* (atom nil)
+        opened-replacement* (atom nil)]
+    (try
+      (let [first-builder (generations/begin-generation source)
+            _ (generations/put! first-builder :first (float-array [1.0 0.0]))
+            first (generations/seal! first-builder)
+            _ (reset! first* first)
+            _ (generations/rooted! first)
+            first-id (generations/generation-id first)]
+        ;; Release the tip, then derive an alternative child from the source.
+        ;; It deliberately reuses and overwrites the same physical vector slot.
+        (a/<!! (generations/close-view! first))
+        (reset! first* nil)
+        (let [replacement-builder (generations/begin-generation source)
+              _ (generations/put! replacement-builder :replacement
+                                  (float-array [2.0 0.0]))
+              replacement (generations/seal! replacement-builder)
+              _ (reset! replacement* replacement)
+              _ (generations/rooted! replacement)
+              replacement-id (generations/generation-id replacement)
+              opened-first (generations/open-generation source first-id)
+              _ (reset! opened-first* opened-first)
+              opened-replacement
+              (generations/open-generation source replacement-id)
+              _ (reset! opened-replacement* opened-replacement)]
+          (is (= [1.0 0.0]
+                 (vec (core/get-vector
+                       (generations/generation-index opened-first) :first))))
+          (is (nil? (core/get-vector
+                     (generations/generation-index opened-first) :replacement)))
+          (is (= [2.0 0.0]
+                 (vec (core/get-vector
+                       (generations/generation-index opened-replacement)
+                       :replacement))))
+          (is (nil? (core/get-vector
+                     (generations/generation-index opened-replacement)
+                     :first)))))
+      (finally
+        (doseq [generation [@opened-replacement* @opened-first* @replacement*
+                            @first*]]
+          (when generation
+            (a/<!! (generations/close-view! generation))))
         (a/<!! (p/close! source))
         (delete-tree! dir)))))
 
@@ -347,7 +495,10 @@
         (is (.exists (io/file mmap-path)))
 
         (a/<!! (generations/close-view! view))
-        (is (not (.exists (io/file mmap-path)))))
+        (is (.exists (io/file mmap-path))
+            "the native source branch owns the shared reusable cache")
+        (is (= 1 @(:refs (:mmap-resource
+                          (p/vector-storage source))))))
       (finally
         (when (and @sealed* (= :sealed-unrooted @(:status @sealed*)))
           (generations/discard! @sealed*))
@@ -379,7 +530,10 @@
                (vec (core/get-vector (generations/generation-index view)
                                      :new))))
         (a/<!! (generations/close-view! view))
-        (is (not (.exists (io/file mmap-path)))))
+        (is (.exists (io/file mmap-path))
+            "the native source branch owns the shared reusable cache")
+        (is (= 1 @(:refs (:mmap-resource
+                          (p/vector-storage source))))))
       (finally
         (when (and @sealed* (= :sealed-unrooted @(:status @sealed*)))
           (generations/discard! @sealed*))
