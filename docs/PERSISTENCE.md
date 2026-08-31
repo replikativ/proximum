@@ -1,14 +1,16 @@
 # Proximum Persistence Design
 
-This document describes the internal persistence mechanisms that enable Proximum's git-like versioning with zero-cost branching.
+This document describes the internal persistence mechanisms that enable Proximum's git-like versioning and copy-on-write branching.
 
 ## Overview
 
 Proximum achieves persistent (immutable) data structure semantics through **copy-on-write (CoW)** at the chunk level with **structural sharing** between versions. This means:
 
 - Every mutation returns a new index version
-- Unchanged data is shared between versions (no copying)
-- Fork/branch operations are O(1) regardless of index size
+- Unchanged graph and metadata structures are shared between versions
+- Embedded linear generations share their append-only vector mmap without copying
+- Native branch forks copy the vector mmap with a filesystem reflink when one is
+  available, and otherwise fall back to a full file copy
 - Historical versions remain accessible
 
 The persistence layer consists of three main components:
@@ -42,11 +44,27 @@ and `reachable-keys` returns the exact transitive Konserve key set for unified
 GC. A builder holds the store's unreferenced-write guard until `rooted!` or
 `discard!`, including across vector writes that occur before sealing.
 
-The current builder deliberately uses an independent mmap. On a filesystem with
-reflinks this is copy-on-write; otherwise it is a full-file copy. This makes the
-protocol correct but not yet suitable for small, high-frequency transactions on
-large indices. A delta/tombstone generation layer or equivalent append overlay
-is required before using this as Datahike's normal write path.
+Linear descendants use distinct logical vector-store handles over one
+reference-counted, append-only mmap. They retain independent vector counts,
+chunk-address roots, pending writes, and close lifetimes, so creating and
+sealing an ordinary embedded generation does not copy the mmap and does not
+depend on filesystem reflink support. Only one live child may derive from a
+given linear tip because two writers would otherwise allocate the same next
+vector slot.
+
+Opening an unrelated historical generation creates a private disposable mmap
+cache and restores its vectors from immutable Konserve chunks. Native Proximum
+branch divergence likewise requires an independent mmap and uses a filesystem
+reflink when the runtime capability probe succeeds, falling back to a full file
+copy otherwise.
+
+Small transactions still have storage-level write amplification independent of
+the mmap. Sealing rewrites the current partial immutable vector chunk (1,000
+vectors by default), persists every dirty HNSW edge chunk, and currently rebuilds
+the vector- and edge-chunk address PSS values from their plain maps. Batching
+inserts reduces the partial-chunk cost. Smaller tail chunks, an immutable
+append-overlay with later compaction, and incremental address-PSS updates are
+possible follow-up optimizations; reflinks do not address these costs.
 
 Do not derive a builder from an old `HnswIndex` handle after mutating one of its
 descendants. Current ordinary index values share their vector writer even though
@@ -421,14 +439,16 @@ When creating a branch, VectorStorage copies the mmap file:
 ```clojure
 (copy-mmap-for-branch! src-path dst-path reflink-supported?)
 
-;; If reflink supported (Btrfs, XFS, ZFS):
+;; If the runtime `cp --reflink=always` capability probe succeeds:
 cp --reflink=auto src dst  → O(1) copy-on-write
 
 ;; Otherwise:
 cp src dst  → O(file-size) full copy
 ```
 
-The copied mmap gives the branch its own writable vector storage while sharing unchanged Konserve chunks.
+The copied mmap gives a native branch its own writable vector storage while
+sharing unchanged Konserve chunks. This path is not used for the ordinary
+linear generation chain of an embedding database.
 
 ### Performance Characteristics
 
@@ -436,8 +456,9 @@ The copied mmap gives the branch its own writable vector storage while sharing u
 |-----------|------------|-------|
 | `append!` | O(dim) | Write to mmap, buffer for Konserve |
 | `get-vector` | O(dim) | Direct mmap read |
-| `sync!` | O(pending-writes) | Wait for async Konserve writes |
+| `sync!` | O(dirty chunks + address-map entries) | Flush immutable chunks and persist roots; address PSS rebuilding is currently linear in its entry count |
 | `distance-squared-to-node` | O(dim) | SIMD via MemorySegment |
+| Linear generation fork | O(1) | Share the append-only mmap through a reference-counted resource |
 | Branch copy (reflink) | O(1) | Copy-on-write file copy |
 | Branch copy (no reflink) | O(file-size) | Full file copy |
 

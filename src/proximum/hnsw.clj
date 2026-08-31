@@ -1480,7 +1480,7 @@
             ;; ext4. Callers can inspect `reflink-supported?`; keep the detail
             ;; at debug level for diagnostics.
             (log/debug :proximum/connect "Filesystem does not support reflink (copy-on-write)"
-                       {:hint "Branch operations will use full file copies. Consider Btrfs, XFS, or ZFS for O(1) branching."
+                       {:hint "Branch operations will use full file copies. Use a filesystem where the runtime reflink probe succeeds for O(1) branching."
                         :mmap-dir mmap-dir}))
         actual-mmap-path (or mmap-path
                              (when mmap-dir (vectors/branch-mmap-path mmap-dir branch)))
