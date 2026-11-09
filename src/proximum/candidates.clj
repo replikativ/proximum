@@ -68,7 +68,11 @@
      :mode            :materialized (default) or :iterative
      :entity-filter   allowed external IDs (Iterable), a predicate receiving
                       [external-id metadata], or an internal ArrayBitSet;
-                      filtering defines the logical universe before LIMIT
+                      filtering defines the logical universe before LIMIT.
+                      Omit the key for no filter; an empty collection yields
+                      no candidates; an explicit nil throws (:nil-entity-filter),
+                      since an empty lazy seq is nil and must not mean
+                      unfiltered. Pass the collection, not (seq coll).
      :strict-order?   iterative pages never regress in distance (default true)
      :max-visited     optional traversal budget; 0/unset means unlimited
      :max-distance-computations optional distance budget
@@ -85,7 +89,15 @@
                       primary-snapshot-id query-id mode entity-filter strict-order?
                       max-visited max-distance-computations timeout-ms
                       max-frontier-nodes]
-               :or {candidate-limit 100 page-size 25 mode :materialized}}]
+               :or {candidate-limit 100 page-size 25 mode :materialized}
+               :as opts}]
+   ;; An omitted :entity-filter means unfiltered, but an explicit nil is
+   ;; refused: nil is also how an empty collection puns (`(seq [])`), and
+   ;; reading that as "unfiltered" would fail open on a restriction.
+   (when (and (contains? opts :entity-filter) (nil? entity-filter))
+     (throw (ex-info (str ":entity-filter is nil. Omit the key for an unfiltered "
+                          "scan, or pass an empty collection for no candidates.")
+                     {:reason :nil-entity-filter})))
    (when-not (pos-int? candidate-limit)
      (throw (ex-info ":candidate-limit must be positive"
                      {:reason :invalid-candidate-limit :value candidate-limit})))

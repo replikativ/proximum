@@ -169,6 +169,11 @@ public final class HnswSearch {
         if (allowedIds == null) {
             return search(seg, edges, query, dim, k, ef, distanceType);
         }
+        if (allowedIds.cardinality() == 0) {
+            // An empty universe has no admissible result. Without this the
+            // beam never fills, never terminates early, and walks the graph.
+            return new double[0];
+        }
 
         int entrypoint = edges.getEntrypoint();
         if (entrypoint < 0) {
@@ -204,6 +209,9 @@ public final class HnswSearch {
 
         if (allowedIds == null) {
             return search(seg, edges, query, dim, k, ef, distanceType, options);
+        }
+        if (allowedIds.cardinality() == 0) {
+            return new double[0];
         }
 
         int entrypoint = edges.getEntrypoint();

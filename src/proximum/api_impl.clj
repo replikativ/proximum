@@ -37,7 +37,10 @@
    Avoiding an intermediate boxed Clojure set materially reduces allocation
    for database-produced bitmap filters."
   [idx external-ids]
-  (let [^ArrayBitSet bitset (ArrayBitSet. (int (p/count-vectors idx)))]
+  ;; Size by the total node count, not the live count: internal ids are never
+  ;; reused, so after deletes live ids reach beyond count-vectors, and
+  ;; ArrayBitSet.add silently drops ids past its size.
+  (let [^ArrayBitSet bitset (ArrayBitSet. (int (p/vector-count-total idx)))]
     (doseq [external-id external-ids]
       (when-let [internal-id (lookup-internal-id idx external-id)]
         (.add bitset (int internal-id))))
@@ -109,7 +112,12 @@
    `opts :filter-strategy` is explicit: `:hnsw` (default) traverses the ANN
    graph and has approximate recall; `:exact` computes a stable exact top-k
    over only the allowed IDs. The latter is intended for sparse upstream
-   filters where graph traversal costs more than the bounded distance scan."
+   filters where graph traversal costs more than the bounded distance scan.
+
+   An empty filter (collection, ArrayBitSet, or predicate admitting nothing)
+   returns []. A nil filter throws (:nil-filter): an empty lazy seq is nil, so
+   nil cannot safely mean either \"no filter\" or \"nothing allowed\". Use
+   search for no filter, and pass collections rather than (seq coll)."
   ([idx query k filter-pred]
    (search-filtered idx query k filter-pred nil))
   ([idx query k filter-pred opts]
