@@ -863,9 +863,18 @@
                    (.add bs i)))
                bs)
 
+             ;; nil is ambiguous between "no filter" and "nothing allowed"
+             ;; (an empty lazy seq is nil), so neither guess is safe.
+             (nil? pred-or-set)
+             (throw (ex-info (str "search-filtered requires a filter, got nil. "
+                                  "Use search for no filter, or an empty "
+                                  "collection for an empty result.")
+                             {:reason :nil-filter}))
+
              :else
              (throw (ex-info "search-filtered requires a predicate fn, Set, or ArrayBitSet"
-                             {:type (type pred-or-set)})))
+                             {:reason :invalid-filter
+                              :type (type pred-or-set)})))
 
            filter-strategy (or (:filter-strategy opts) :hnsw)
            _ (when-not (#{:hnsw :exact} filter-strategy)

@@ -388,3 +388,75 @@
             "strict iterative ordering includes the internal-id tie-break"))
       (finally
         (a/<!! (core/close! idx))))))
+
+(deftest empty-entity-filter-yields-no-candidates-test
+  ;; datahike#1144: an empty upstream filter means "nothing allowed". Every
+  ;; non-nil empty shape must give an empty result, without walking the graph.
+  (let [base (test-index)
+        idx (reduce (fn [i n]
+                      (core/insert i (float-array [(float n) 0.0]) n))
+                    base
+                    (range 50))
+        q (float-array [3.0 0.0])
+        shapes {:vector [] :set #{} :java-list (java.util.ArrayList.)
+                :array-bitset (ArrayBitSet. 50) :pred (fn [_ _] false)}]
+    (try
+      (doseq [[shape f] shapes
+              strategy [:hnsw :exact]]
+        (is (= [] (core/search-filtered idx q 5 f {:filter-strategy strategy}))
+            (str shape " " strategy)))
+      (is (= :nil-filter (reason #(core/search-filtered idx q 5 nil)))
+          "nil stays an error: it is ambiguous with no filter")
+      (doseq [mode [:materialized :iterative]]
+        (is (= :nil-entity-filter
+               (reason #(core/start-candidate-scan
+                         idx q {:mode mode :entity-filter nil
+                                :primary-snapshot-id :empty})))
+            (str "explicit nil :entity-filter must not fail open, " mode))
+        (let [scan (core/start-candidate-scan
+                    idx q {:mode mode :candidate-limit 5 :page-size 5
+                           :primary-snapshot-id :empty})
+              page (core/candidate-page scan)]
+          (try
+            (is (= 5 (count (:candidates page)))
+                (str "an omitted :entity-filter stays unfiltered, " mode))
+            (is (false? (get-in page [:metadata :entity-filtered?])))
+            (finally
+              (core/close-candidate-scan! scan)))))
+      (doseq [[shape f] shapes
+              mode [:materialized :iterative]]
+        (let [scan (core/start-candidate-scan
+                    idx q {:mode mode :entity-filter f :candidate-limit 5
+                           :page-size 5 :primary-snapshot-id :empty})
+              page (core/candidate-page scan)]
+          (try
+            (is (= [] (:candidates page)) (str shape " " mode))
+            (is (true? (:exhausted? page)))
+            (is (true? (get-in page [:metadata :entity-filtered?])))
+            (when (= :iterative mode)
+              (is (= :frontier-empty (:stop-reason page)))
+              (is (zero? (get-in page [:metadata :visited-count]))
+                  "an empty universe must not traverse the graph"))
+            (finally
+              (core/close-candidate-scan! scan)))))
+      (finally
+        (a/<!! (core/close! idx))))))
+
+(deftest external-id-filter-survives-deletes-test
+  ;; Internal ids are not reused, so after deletes live ids exceed the live
+  ;; count. The external-id filter bitset must be sized by the total.
+  (let [base (test-index)
+        idx (reduce (fn [i n]
+                      (core/insert i (float-array [(float n) 0.0]) n))
+                    base
+                    (range 100))
+        idx (reduce core/delete idx (range 60))
+        q (float-array [99.0 0.0])]
+    (try
+      (doseq [strategy [:hnsw :exact]]
+        (is (= [99 98 97]
+               (mapv :id (core/search-filtered idx q 3 [97 98 99]
+                                               {:filter-strategy strategy :ef 100})))
+            (str strategy)))
+      (finally
+        (a/<!! (core/close! idx))))))

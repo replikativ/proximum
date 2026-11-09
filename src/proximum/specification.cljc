@@ -400,6 +400,10 @@ Filter can be:
   - (fn [id metadata] boolean) - predicate receives external ID
   - Iterable collection of allowed external IDs
 
+An empty filter returns []. A nil filter throws (:nil-filter): an empty lazy
+seq is nil, so pass the collection rather than (seq coll), and use search for
+no filter.
+
 Example:
   (search-filtered idx query 10 #{\"doc-1\" \"doc-2\"})"
      :impl proximum.api-impl/search-filtered

@@ -110,6 +110,13 @@ public final class HnswCandidateCursor implements AutoCloseable {
             finish("frontier-empty");
             return;
         }
+        if (this.allowedIds != null && this.allowedIds.cardinality() == 0) {
+            // An empty logical universe can never admit a candidate; without
+            // this the first page walks the whole reachable graph to learn so.
+            // Reported as frontier-empty: there is no admissible frontier.
+            finish("frontier-empty");
+            return;
+        }
 
         long started = System.nanoTime();
         try {
