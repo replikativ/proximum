@@ -95,3 +95,19 @@
                                     #(count (remove (fn [l] (= (count l) (count (distinct l))))
                                                     (layer-0-lists (vec (repeatedly 300 (fn [] (aclone ^floats v)))))))))]
     (is (zero? twice) (str twice " neighbor lists hold the same id twice"))))
+
+(deftest an-ef-construction-above-the-buffer-cap-is-honoured
+  ;; The insert search buffers were capped at 4096 entries while the result
+  ;; heap grew to ef-construction: with more reachable vectors than the cap,
+  ;; the next result was written past the end of the array.
+  (let [n 4300
+        idx (core/insert-batch
+             (core/create-index {:type :hnsw :dim 2 :distance :euclidean :M 8
+                                 :ef-construction 4500 :capacity (* 2 n)
+                                 :store-config {:backend :memory :id (random-uuid)}})
+             (vec (repeatedly n #(random-vector 2)))
+             (range n)
+             {:parallelism 1})]
+    (try
+      (is (= n (core/count-vectors idx)))
+      (finally (core/close! idx)))))
