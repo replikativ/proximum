@@ -199,8 +199,18 @@ public final class HnswInsert {
                 ep = searchLayerGreedy(seg, edges, vector, dim, ep, level, distanceType);
             }
 
-            // For each layer from node level down to 0
+            // Choose the neighbors top-down, then link bottom-up.
+            //
+            // The order of the writes matters in a parallel batch. Once this
+            // node has an edge on a layer, a concurrent insert can descend onto
+            // it there and start the layer below from it. If the node were not
+            // linked on that lower layer yet, that insert would search from a
+            // node without edges, find only it, and end up with a single
+            // neighbor - one that soon prunes the link back, leaving the other
+            // node unreachable. So a node appears on a layer only after it is
+            // linked on every layer below.
             int insertLevel = Math.min(nodeLevel, currentMaxLevel);
+            int[][] chosen = new int[insertLevel + 1][];
             for (int level = insertLevel; level >= 0; level--) {
                 int maxNeighbors = (level == 0) ? M0 : M;
 
@@ -210,12 +220,30 @@ public final class HnswInsert {
                 logger.debug("Insert nodeId={} level={} searchResult.count={} candidates={}",
                     nodeId, level, result.count, Arrays.toString(Arrays.copyOf(result.ids, result.count)));
 
-                // Apply diversity heuristic for neighbor selection
-                // Also consider in-flight inserts as candidates (scoped to this index)
-                int[] selected = selectNeighborsHeuristic(seg, dim, edgesId, nodeId, vector, result,
-                        maxNeighbors, distanceType);
+                // Apply diversity heuristic for neighbor selection.
+                // In-flight inserts are candidates on layer 0 only: there a node
+                // without edges yet is a harmless dead end, while on an upper
+                // layer an edge to it would break the rule above (and it may
+                // not belong to that layer at all).
+                chosen[level] = (level == 0)
+                        ? selectNeighborsHeuristic(seg, dim, edgesId, nodeId, vector, result,
+                                maxNeighbors, distanceType)
+                        : selectNeighborsHeuristic(seg, dim, nodeId, result, maxNeighbors, distanceType);
 
-                logger.debug("Insert nodeId={} level={} selected={}", nodeId, level, Arrays.toString(selected));
+                logger.debug("Insert nodeId={} level={} selected={}", nodeId, level, Arrays.toString(chosen[level]));
+
+                // Entry point for the next layer: the nearest node found in the graph
+                for (int i = 0; i < result.count; i++) {
+                    if (result.ids[i] != nodeId) {
+                        ep = result.ids[i];
+                        break;
+                    }
+                }
+            }
+
+            for (int level = 0; level <= insertLevel; level++) {
+                int maxNeighbors = (level == 0) ? M0 : M;
+                int[] selected = chosen[level];
 
                 if (selected.length == 0) {
                     logger.warn("Insert nodeId={} level={} - no neighbors selected", nodeId, level);
@@ -223,15 +251,12 @@ public final class HnswInsert {
                 }
 
                 // Add forward edges (new node -> neighbors)
-                edges.setNeighbors(level, nodeId, selected);
+                setForwardEdges(seg, dim, edges, level, nodeId, selected, maxNeighbors, distanceType);
 
                 // Add reverse edges (neighbors -> new node) with pruning
                 for (int neighborId : selected) {
                     addReverseEdge(seg, dim, edges, level, neighborId, nodeId, maxNeighbors, distanceType);
                 }
-
-                // Update entry point for next layer
-                ep = selected[0];
             }
 
             // Update entry point and max level if this node is higher
@@ -722,6 +747,46 @@ public final class HnswInsert {
     }
 
     /**
+     * Write a new node's own neighbor list.
+     *
+     * In a parallel batch the list may not be empty: a concurrent insert that
+     * picked this node as a neighbor has already written its back-link here.
+     * Overwriting the list would drop that back-link, and it is often the only
+     * edge leading to the other node. Those links are kept, pruned like any
+     * other back-link when the list is full.
+     */
+    private static void setForwardEdges(
+            MemorySegment seg,
+            int dim,
+            PersistentEdgeIndex edges,
+            int layer,
+            int nodeId,
+            int[] selected,
+            int maxNeighbors,
+            int distanceType) {
+
+        edges.lockNode(nodeId);
+        try {
+            int[] arrived = edges.getNeighbors(layer, nodeId);
+            int[] list = selected;
+            if (arrived != null) {
+                for (int other : arrived) {
+                    if (other == nodeId || contains(list, other)) continue;
+                    if (list.length < maxNeighbors) {
+                        list = Arrays.copyOf(list, list.length + 1);
+                        list[list.length - 1] = other;
+                    } else {
+                        list = pruneWithHeuristic(seg, dim, nodeId, list, other, maxNeighbors, distanceType);
+                    }
+                }
+            }
+            edges.setNeighbors(layer, nodeId, list);
+        } finally {
+            edges.unlockNode(nodeId);
+        }
+    }
+
+    /**
      * Add reverse edge with pruning.
      */
     private static void addReverseEdge(
@@ -739,29 +804,37 @@ public final class HnswInsert {
             return;
         }
 
-        // Stale edges to deleted nodes are dropped here rather than kept: in a
-        // full list a close deleted node would win the pruning below and the
-        // new, live back-link would be the one rejected.
-        int[] current = withoutDeleted(edges, edges.getNeighbors(layer, neighborId));
-        int currentCount = (current == null) ? 0 : current.length;
+        // Read, change and write under the node's lock: two inserts adding a
+        // back-link to the same neighbor at once would otherwise both read the
+        // old list and the second write would drop the first one's link.
+        edges.lockNode(neighborId);
+        try {
+            // Stale edges to deleted nodes are dropped here rather than kept: in a
+            // full list a close deleted node would win the pruning below and the
+            // new, live back-link would be the one rejected.
+            int[] current = withoutDeleted(edges, edges.getNeighbors(layer, neighborId));
+            int currentCount = (current == null) ? 0 : current.length;
 
-        // Check if already present
-        for (int i = 0; i < currentCount; i++) {
-            if (current[i] == newNodeId) return;
-        }
-
-        if (currentCount < maxNeighbors) {
-            // Just append
-            int[] newNeighbors = new int[currentCount + 1];
-            if (current != null) {
-                System.arraycopy(current, 0, newNeighbors, 0, currentCount);
+            // Check if already present
+            for (int i = 0; i < currentCount; i++) {
+                if (current[i] == newNodeId) return;
             }
-            newNeighbors[currentCount] = newNodeId;
-            edges.setNeighbors(layer, neighborId, newNeighbors);
-        } else {
-            // Need to prune - add new and select best M
-            int[] newNeighbors = pruneWithHeuristic(seg, dim, neighborId, current, newNodeId, maxNeighbors, distanceType);
-            edges.setNeighbors(layer, neighborId, newNeighbors);
+
+            if (currentCount < maxNeighbors) {
+                // Just append
+                int[] newNeighbors = new int[currentCount + 1];
+                if (current != null) {
+                    System.arraycopy(current, 0, newNeighbors, 0, currentCount);
+                }
+                newNeighbors[currentCount] = newNodeId;
+                edges.setNeighbors(layer, neighborId, newNeighbors);
+            } else {
+                // Need to prune - add new and select best M
+                int[] newNeighbors = pruneWithHeuristic(seg, dim, neighborId, current, newNodeId, maxNeighbors, distanceType);
+                edges.setNeighbors(layer, neighborId, newNeighbors);
+            }
+        } finally {
+            edges.unlockNode(neighborId);
         }
     }
 

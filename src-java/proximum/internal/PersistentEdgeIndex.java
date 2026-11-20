@@ -647,6 +647,22 @@ public final class PersistentEdgeIndex {
         }
     }
 
+    /**
+     * Hold a node's lock across a read-modify-write of its neighbor list.
+     * {@link #setNeighbors} locks only the write itself, so two writers that
+     * each read the list, add one neighbor and write it back would lose one of
+     * the two. Reentrant: setNeighbors may be called while holding it. Always
+     * pair with {@link #unlockNode} in a finally block, and hold one node's
+     * lock at a time.
+     */
+    public void lockNode(int nodeId) {
+        stripedLocks[nodeId & LOCK_MASK].lock();
+    }
+
+    public void unlockNode(int nodeId) {
+        stripedLocks[nodeId & LOCK_MASK].unlock();
+    }
+
     private int[] getNeighborsLayer0(int nodeId) {
         int chunkIdx = nodeId >> CHUNK_SHIFT;
         int nodeOffset = nodeId & CHUNK_MASK;
