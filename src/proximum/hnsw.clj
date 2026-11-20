@@ -910,7 +910,7 @@
           new-pes (.fork ^PersistentEdgeIndex pes-edges)
           ;; HnswInsert/delete handles transient mode internally
           _ (HnswInsert/delete seg new-pes (int id) dim (int M) (int M0) distance-type
-                              (int (:vector-count state)))
+                               (int (:vector-count state)))
           old-meta (meta/lookup-metadata metadata id)
           old-external-id (meta/external-id-from-meta old-meta)
           new-metadata (disj metadata {:node-id id})
