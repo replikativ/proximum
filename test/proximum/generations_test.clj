@@ -681,3 +681,34 @@
         ;; One close only: these two legacy values share the same VectorStore.
         (a/<!! (p/close! descendant))
         (delete-tree! dir)))))
+
+(deftest a-source-with-an-open-generation-cannot-be-appended-to
+  ;; The builder shares the source's mmap and continues at the source's count.
+  ;; An insert through the source claimed the same next slot and replaced the
+  ;; builder's vector with its own.
+  (let [dir (temp-dir)
+        source (source-index dir)
+        builder* (atom nil)]
+    (try
+      (let [builder (generations/begin-generation source)]
+        (reset! builder* builder)
+        (generations/put! builder :child (float-array [1.0 2.0]))
+        (is (= :vector-store-not-linear-tip
+               (try
+                 (core/insert source (float-array [5.0 6.0]) :intruder)
+                 nil
+                 (catch clojure.lang.ExceptionInfo failure
+                   (:reason (ex-data failure))))))
+        (is (= [1.0 2.0]
+               (vec (core/get-vector (generations/builder-index builder) :child)))
+            "the builder's vector is still its own")
+        (a/<!! (generations/discard! builder))
+        (reset! builder* nil)
+        (testing "once the generation is closed the source is writable again"
+          (let [after (core/insert source (float-array [5.0 6.0]) :later)]
+            (is (= [5.0 6.0] (vec (core/get-vector after :later)))))))
+      (finally
+        (when @builder*
+          (a/<!! (generations/discard! @builder*)))
+        (a/<!! (p/close! source))
+        (delete-tree! dir)))))

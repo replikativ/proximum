@@ -613,6 +613,17 @@
           idx (long @count-atom)]
       (when (>= idx capacity)
         (throw (ex-info "Mmap capacity exceeded" {:capacity capacity :idx idx})))
+      ;; A linear generation shares its parent's mmap and continues at the
+      ;; parent's count. While it is open the parent must not append: both
+      ;; would claim the same next slot and the later write would replace the
+      ;; other's vector. Deriving already requires the tip; appending did not.
+      (when-let [resource (:mmap-resource vs)]
+        (locking resource
+          (let [tip @(:linear-tip resource)]
+            (when (and tip (not (identical? vs tip)))
+              (throw (ex-info "This vector store has an open linear generation; it cannot be appended to until that generation is closed"
+                              {:reason :vector-store-not-linear-tip
+                               :mmap-path (:mmap-path vs)}))))))
       ;; Write to mmap immediately (for fast reads)
       (write-vector-to-mmap! (:mmap-buf vs) dim idx vector)
       ;; Add to write buffer for konserve (order now matches slot order)
