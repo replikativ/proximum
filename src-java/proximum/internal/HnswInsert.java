@@ -422,7 +422,9 @@ public final class HnswInsert {
             int distanceType) {
 
         // Reuse thread-local arrays to avoid allocation per search
-        int maxSize = Math.min(ef * 4, 4096);
+        // The result heap holds up to ef entries, so the buffers must too. The
+        // cap alone let an ef above 4096 write past the end of the array.
+        int maxSize = Math.max(Math.min(ef * 4, 4096), ef + 1);
 
         // Visited bitset with lazy clearing - only clear words touched in previous search
         int requiredBitsetSize = (edges.getMaxNodes() + 63) / 64;
