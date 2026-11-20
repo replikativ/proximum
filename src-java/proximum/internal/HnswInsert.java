@@ -814,6 +814,17 @@ public final class HnswInsert {
         // Read, change and write under the node's lock: two inserts adding a
         // back-link to the same neighbor at once would otherwise both read the
         // old list and the second write would drop the first one's link.
+        //
+        // Pruning a full list is the expensive part (a sort and up to M^2
+        // distances), so it is computed BEFORE taking the lock, from an
+        // unlocked read, and used only if the list is still that one. The lock
+        // is then held for a read, a comparison and a write.
+        int[] guess = withoutDeleted(edges, edges.getNeighbors(layer, neighborId));
+        int[] pruned = null;
+        if (guess != null && guess.length >= maxNeighbors && !contains(guess, newNodeId)) {
+            pruned = pruneWithHeuristic(seg, dim, neighborId, guess, newNodeId, maxNeighbors, distanceType);
+        }
+
         edges.lockNode(neighborId);
         try {
             // Stale edges to deleted nodes are dropped here rather than kept: in a
@@ -835,8 +846,11 @@ public final class HnswInsert {
                 }
                 newNeighbors[currentCount] = newNodeId;
                 edges.setNeighbors(layer, neighborId, newNeighbors);
+            } else if (pruned != null && Arrays.equals(current, guess)) {
+                // Nobody changed the list since the unlocked read
+                edges.setNeighbors(layer, neighborId, pruned);
             } else {
-                // Need to prune - add new and select best M
+                // The list changed meanwhile - prune what is there now
                 int[] newNeighbors = pruneWithHeuristic(seg, dim, neighborId, current, newNodeId, maxNeighbors, distanceType);
                 edges.setNeighbors(layer, neighborId, newNeighbors);
             }
