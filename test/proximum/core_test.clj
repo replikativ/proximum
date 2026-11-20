@@ -1604,3 +1604,45 @@
         (cleanup (str path "-meta"))
         (cleanup (str path "-count"))
         (cleanup (str path "-into"))))))
+
+;; -----------------------------------------------------------------------------
+;; Search after deletes
+;;
+;; Delete clears the deleted node's edges and removes it from the lists of its
+;; OWN neighbors. An edge is directed, so a node that pointed at it without
+;; being pointed back at keeps a stale edge to a node that now has none. The
+;; upper-layer descent stepped onto such a node, could not leave, and the layer
+;; below then started from a node with nothing to expand: the search returned
+;; NOTHING, permanently, though the index held live vectors. Which node tops
+;; the hierarchy is random, so it struck a few runs in a hundred.
+
+(defn- spread-vector [i]
+  (let [a (/ (double i) 10.0)]
+    (float-array [(Math/cos a) (Math/sin a) (/ (double i) 100.0) 1.0])))
+
+(defn- spread-index [n]
+  (reduce (fn [idx i] (assoc idx (str "d" i) (spread-vector i)))
+          (core/create-index {:type :hnsw :dim 4 :distance :cosine :capacity 1000
+                              :store-config {:backend :memory
+                                             :id (java.util.UUID/randomUUID)}})
+          (range n)))
+
+(deftest search-after-deleting-the-oldest-vectors
+  (dotimes [_ 200]
+    (let [idx (reduce (fn [idx i] (dissoc idx (str "d" i))) (spread-index 100) (range 60))
+          survivors (set (map #(str "d" %) (range 60 100)))]
+      (is (= survivors (set (map :id (core/search idx (spread-vector 0) 100))))
+          "every surviving vector is found, and no deleted one")
+      (let [idx' (assoc idx "new" (spread-vector 7))]
+        (is (= (conj survivors "new")
+               (set (map :id (core/search idx' (spread-vector 0) 100))))
+            "a vector inserted after the deletes joins the same graph")))))
+
+(deftest search-after-deleting-all-but-one
+  ;; The entry point's own neighbors may all be gone before it is: the
+  ;; replacement must then come from the rest of the graph, not be "none".
+  (dotimes [_ 100]
+    (let [order (shuffle (range 30))
+          keep-id (first order)
+          idx (reduce (fn [idx i] (dissoc idx (str "d" i))) (spread-index 30) (rest order))]
+      (is (= [(str "d" keep-id)] (mapv :id (core/search idx (spread-vector 0) 10)))))))

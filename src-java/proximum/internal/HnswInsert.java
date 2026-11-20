@@ -477,6 +477,10 @@ public final class HnswInsert {
                 int neighborId = neighborBuf[i];
                 if (isVisited(visited, neighborId)) continue;
                 setVisitedTracked(visited, neighborId, maxWordHolder);
+                // Reached over a stale edge: a deleted node must not become a
+                // neighbor of the node being inserted - the link would lead
+                // nowhere, and the back-link would give a deleted node edges.
+                if (edges.isDeleted(neighborId)) continue;
 
                 double neighborDist = Distance.compute(seg, neighborId, dim, query, distanceType);
 
@@ -542,6 +546,9 @@ public final class HnswInsert {
 
             for (int i = 0; i < neighborCount; i++) {
                 int neighborId = neighborBuf[i];
+                // A deleted node has no edges; stepping onto one strands the
+                // descent (see HnswSearch.searchLayerGreedy).
+                if (edges.isDeleted(neighborId)) continue;
                 double neighborDist = Distance.compute(seg, neighborId, dim, query, distanceType);
                 if (neighborDist < currentDist) {
                     current = neighborId;
@@ -1229,6 +1236,29 @@ public final class HnswInsert {
                     // Check if neighbor is not deleted (has neighbors)
                     if (!edges.isDeleted(neighbor)) {
                         return neighbor;
+                    }
+                }
+            }
+        }
+        // None of its own neighbors is alive. That does not make the graph
+        // empty: they may all have been deleted before it. Declaring it empty
+        // here made every later search return nothing while live nodes
+        // remained. Take any live node that still has edges, highest layer
+        // first. Rare path, linear in the allocated nodes.
+        int slots0 = edges.getSlotsPerNode();
+        int slotsUpper = edges.getSlotsPerNodeUpper();
+        for (int level = maxLevel; level >= 0; level--) {
+            int slots = (level == 0) ? slots0 : slotsUpper;
+            for (int chunkIdx = 0; chunkIdx < edges.getNumChunks(); chunkIdx++) {
+                int[] chunk = (level == 0) ? edges.getLayer0Chunk(chunkIdx)
+                                           : edges.getUpperLayerChunk(level, chunkIdx);
+                if (chunk == null) continue;
+                for (int j = 0; j < PersistentEdgeIndex.CHUNK_SIZE; j++) {
+                    if (chunk[j * slots] > 0) {
+                        int id = (chunkIdx << PersistentEdgeIndex.CHUNK_SHIFT) | j;
+                        if (id != deletedId && !edges.isDeleted(id)) {
+                            return id;
+                        }
                     }
                 }
             }
