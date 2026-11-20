@@ -728,6 +728,25 @@ Enable cryptographic hashing for compliance and verification:
 - Supply chain integrity
 - Reproducibility (exact hash ensures same state)
 
+### Graph health after deletes
+
+Deleting vectors can leave live vectors that no path from the entry point leads
+to. A search never returns such a vector, although it is stored and counted.
+`reachability` walks the graph and reports them:
+
+```clojure
+(prox/reachability idx)
+; => {:live-count 9000, :reachable-count 8997, :unreachable-count 3,
+;     :unreachable ["doc-17" "doc-204" "doc-5312"], :fully-reachable? false,
+;     :stale-edge-count 412}
+```
+
+`:stale-edge-count` is the number of edges that still point at a deleted vector.
+Each takes a neighbor slot a live vector could use, so recall falls as they
+accumulate. Compaction (below) rebuilds the graph from the live vectors and
+removes both; nothing else reconnects an unreachable vector. The walk reads the
+whole graph, so run it as a health check, not per request.
+
 ### Compaction
 
 Reclaim space from deleted vectors:

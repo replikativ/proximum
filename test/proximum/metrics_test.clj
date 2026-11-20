@@ -457,3 +457,47 @@
 
         (finally
           (cleanup-path! base))))))
+
+;; -----------------------------------------------------------------------------
+;; reachability Tests
+
+(defn- line-index
+  "Points 0..n-1 on a line, inserted in order: point i has internal and external id i."
+  [n]
+  (reduce (fn [idx i] (core/insert idx (float-array [(float i) 0.0]) i))
+          (core/create-index {:type :hnsw :dim 2 :distance :euclidean :capacity 100
+                              :seed 42
+                              :store-config {:backend :memory :id (random-uuid)}})
+          (range n)))
+
+(deftest test-reachability-of-an-intact-index
+  (let [idx (line-index 20)]
+    (try
+      (is (= {:live-count 20 :reachable-count 20 :unreachable-count 0
+              :unreachable [] :fully-reachable? true :stale-edge-count 0}
+             (core/reachability idx)))
+      (finally (core/close! idx)))))
+
+(deftest test-reachability-reports-what-a-search-cannot-reach
+  ;; Wire the graph by hand: 0 - 1 - 2 form the component the entry point is in,
+  ;; 3 and 4 only point at each other, and 2 keeps an edge to 5, which is deleted.
+  (let [idx (line-index 6)
+        ^proximum.internal.PersistentEdgeIndex pes (p/edge-storage idx)]
+    (try
+      (.asTransient pes)
+      (doseq [layer (range (inc (.getCurrentMaxLevel pes))) node (range 6)]
+        (.setNeighbors pes (int layer) (int node) (int-array 0)))
+      (doseq [[node neighbors] {0 [1] 1 [0 2] 2 [1 5] 3 [4] 4 [3]}]
+        (.setNeighbors pes 0 (int node) (int-array neighbors)))
+      (.setCurrentMaxLevel pes 0)
+      (.setEntrypoint pes 0)
+      (.markDeleted pes 5)
+      (.asPersistent pes)
+      (let [r (core/reachability idx)]
+        (is (= 3 (:reachable-count r)))
+        (is (= 2 (:unreachable-count r)))
+        (is (= #{3 4} (set (:unreachable r))) "by external id")
+        (is (false? (:fully-reachable? r)))
+        (is (= 1 (:stale-edge-count r))))
+      (is (= 1 (count (:unreachable (core/reachability idx {:max-ids 1})))))
+      (finally (core/close! idx)))))
