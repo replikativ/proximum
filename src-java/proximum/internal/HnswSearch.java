@@ -322,6 +322,7 @@ public final class HnswSearch {
 
                 for (int i = 0; i < count; i++) {
                     int neighborId = chunk[base + 1 + i];
+                    if (edges.isDeleted(neighborId)) continue;  // see below
                     double neighborDist = Distance.compute(seg, neighborId, dim, query, distanceType);
                     if (nearer(neighborId, neighborDist, current, currentDist)) {
                         current = neighborId;
@@ -334,6 +335,14 @@ public final class HnswSearch {
                 if (neighbors == null) break;
 
                 for (int neighborId : neighbors) {
+                    // A deleted node has NO edges (delete clears them), so the
+                    // descent must never step onto one: it could not leave, and
+                    // the layer below would start from a node with nothing to
+                    // expand and return no results at all. Delete removes the
+                    // node from the lists of its OWN neighbors only; an edge is
+                    // directed, so a node that pointed at it without being
+                    // pointed back at keeps the stale edge.
+                    if (edges.isDeleted(neighborId)) continue;
                     double neighborDist = Distance.compute(seg, neighborId, dim, query, distanceType);
                     if (nearer(neighborId, neighborDist, current, currentDist)) {
                         current = neighborId;
@@ -527,6 +536,9 @@ public final class HnswSearch {
                 int neighborId = chunk[base + 1 + i];
                 if (isVisited(visited, neighborId)) continue;
                 setVisitedTracked(visited, neighborId, maxWordHolder);
+                // A deleted node has no edges and is never a result: as a
+                // candidate it only takes a frontier slot from a live node.
+                if (edges.isDeleted(neighborId)) continue;
 
                 double neighborDist = Distance.compute(seg, neighborId, dim, query, distanceType);
                 distCompCount++;
@@ -693,6 +705,9 @@ public final class HnswSearch {
                 int neighborId = chunk[base + 1 + i];
                 if (isVisited(visited, neighborId)) continue;
                 setVisitedTracked(visited, neighborId, maxWordHolder);
+                // A deleted node has no edges and is never a result: as a
+                // candidate it only takes a frontier slot from a live node.
+                if (edges.isDeleted(neighborId)) continue;
 
                 double neighborDist = Distance.compute(seg, neighborId, dim, query, distanceType);
                 distCompCount++;

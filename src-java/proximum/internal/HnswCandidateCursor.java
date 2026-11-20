@@ -295,6 +295,9 @@ public final class HnswCandidateCursor implements AutoCloseable {
                     break;
                 }
                 markVisited(neighborId);
+                if (edges.isDeleted(neighborId)) {
+                    continue;  // no edges, never a result: not a candidate
+                }
                 Node neighbor = distanceNode(neighborId);
                 if (neighbor == null) {
                     break;
@@ -349,6 +352,11 @@ public final class HnswCandidateCursor implements AutoCloseable {
                 if (timeoutNanos > 0 && (System.nanoTime() - started) >= timeoutNanos) {
                     finish("timeout");
                     break;
+                }
+                // A deleted node has no edges: the descent could not leave it
+                // (see HnswSearch.searchLayerGreedy).
+                if (edges.isDeleted(neighbor)) {
+                    continue;
                 }
                 Node neighborNode = distanceNode(neighbor);
                 if (neighborNode == null) {
