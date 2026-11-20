@@ -821,3 +821,36 @@
       (finally
         (cleanup path)
         (cleanup (str path "-metadata"))))))
+
+(deftest test-online-compaction-delete-of-a-vector-inserted-during-compaction
+  ;; The source already has a deleted vector, so its live count and its next
+  ;; internal id differ. The delta log recorded an insert under the live count
+  ;; and its delete under the real id; replay could not match them and the
+  ;; deleted vector came back in the compacted index.
+  (let [path (temp-path)
+        target-base (str path "-resurrect")]
+    (try
+      (let [idx (-> (create-test-index {:type :hnsw :dim 4 :M 8 :ef-construction 50
+                                        :storage-path path :capacity 100})
+                    (core/insert-batch (random-vectors 3 4) [:a :b :c])
+                    (core/delete :a))
+            state (core/start-online-compaction
+                   idx
+                   {:store-config (store-config-for target-base (java.util.UUID/randomUUID))
+                    :mmap-dir (mmap-dir-for target-base)}
+                   {:batch-size 5})
+            added (float-array [9.0 9.0 9.0 9.0])
+            state (-> state
+                      (core/insert added :during)
+                      (core/insert-batch (random-vectors 2 4) [:batch-1 :batch-2])
+                      (core/delete :during)
+                      (core/delete :batch-2))
+            compacted (a/<!! (core/finish-online-compaction! state))]
+        (try
+          (is (= #{:b :c :batch-1}
+                 (set (map :id (core/search compacted added 10 {:ef 50})))))
+          (is (= 3 (core/count-vectors compacted)))
+          (finally (a/<!! (core/close! compacted)))))
+      (finally
+        (cleanup path)
+        (cleanup target-base)))))

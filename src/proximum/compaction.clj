@@ -302,7 +302,7 @@
           ;; Atomically update batch-state with new index and id-mappings
           (swap! batch-state
                  (fn [{:keys [idx id-mapping]}]
-                   (let [new-count-before (p/count-vectors idx)
+                   (let [new-count-before (p/vector-count-total idx)
                          idx-after (p/insert-batch idx vectors {:metadata metadata})
                          ;; Build new mappings for this batch
                          new-mappings (into {}
@@ -448,7 +448,10 @@
 
          ;; Get index config and create new index of same type (polymorphic!)
          base-config (p/index-config idx)
-         new-capacity (max live-count (* 2 live-count))
+         ;; At least the source's capacity: the wrapper accepts writes up to
+         ;; that, and every one of them is replayed into the new index. With
+         ;; less, a compaction that took inserts could fail at the very end.
+         new-capacity (max (long (p/capacity idx)) (* 2 live-count))
          new-idx (p/create-index (merge base-config
                                         {:store-config store-config
                                          :mmap-dir mmap-dir
@@ -509,7 +512,11 @@
               {:op :insert
                :vector vector
                :metadata meta-map
-               :source-id (dec (p/count-vectors source-after))})
+               ;; The internal id the source gave it: ids count every vector
+               ;; ever inserted. The live count is smaller once anything was
+               ;; deleted, and a later delete of this vector (logged under its
+               ;; real id) could then not be matched to this insert.
+               :source-id (dec (p/vector-count-total source-after))})
        (CompactionState. source-after (.-batch-state state) (.-delta-log state)
                          (.-copy-future state) (.-finished? state) (.-error-atom state)
                          (.-config state) (.-_meta state)))))
@@ -533,7 +540,7 @@
                           :hint "Finish compaction sooner or increase :max-delta-size"}))))
      (let [{:keys [metadata]} opts
            source-before (.-source-idx state)
-           count-before (p/count-vectors source-before)
+           count-before (p/vector-count-total source-before)
            source-after (p/insert-batch source-before vecs opts)
            ;; Build all delta entries at once for efficiency (single swap!)
            delta-entries (mapv (fn [i v]
@@ -806,7 +813,9 @@
                (case op
                  :insert
                  (let [{:keys [vector metadata source-id]} delta
-                       count-before (p/count-vectors idx)
+                       ;; the id the new index gives it - again the total,
+                       ;; an earlier delta may already have deleted from it
+                       count-before (p/vector-count-total idx)
                        idx-after (p/insert idx vector metadata)]
                     ;; Track mapping for this new insert
                    (swap! new-mappings assoc source-id count-before)
