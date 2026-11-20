@@ -81,7 +81,10 @@ public final class HnswInsert {
     private static final ConcurrentHashMap<InFlightKey, float[]> IN_FLIGHT_INSERTS = new ConcurrentHashMap<>();
 
     // Composite key for in-flight inserts: (edges instance identity, nodeId)
-    private record InFlightKey(int edgesId, int nodeId) {}
+    // Keyed by the edge index itself, compared by identity. It used to be its
+    // identity HASH, which two live indexes can share: one could then select the
+    // other's in-flight node ids as neighbors.
+    private record InFlightKey(PersistentEdgeIndex edgesId, int nodeId) {}
 
     // =========================================================================
     // Vector Normalization (delegates to Distance)
@@ -182,7 +185,7 @@ public final class HnswInsert {
         }
 
         // Use edges identity hash as part of key to scope per-index
-        int edgesId = System.identityHashCode(edges);
+        PersistentEdgeIndex edgesId = edges;
         InFlightKey inFlightKey = new InFlightKey(edgesId, nodeId);
 
         // Register this insert as in-flight so concurrent inserts can see us
@@ -646,7 +649,7 @@ public final class HnswInsert {
      *
      * @param seg           MemorySegment for vector storage
      * @param dim           Vector dimensionality
-     * @param edgesId       Identity hash of PersistentEdgeIndex - used to scope in-flight lookups
+     * @param edgesId       The edge index - scopes in-flight lookups to it
      * @param nodeId        The node being inserted
      * @param vector        The vector being inserted
      * @param candidates    Search result candidates from graph traversal
@@ -656,7 +659,7 @@ public final class HnswInsert {
     private static int[] selectNeighborsHeuristic(
             MemorySegment seg,
             int dim,
-            int edgesId,
+            PersistentEdgeIndex edgesId,
             int nodeId,
             float[] vector,
             SearchResult candidates,
@@ -927,9 +930,9 @@ public final class HnswInsert {
      * Distance between any two nodes - handles in-flight vectors (not yet in segment).
      * If a node is in IN_FLIGHT_INSERTS, uses its vector; otherwise reads from segment.
      *
-     * @param edgesId Identity hash of PersistentEdgeIndex - used to scope in-flight lookups
+     * @param edgesId The edge index - scopes in-flight lookups to it
      */
-    private static double distanceAnyNodes(MemorySegment seg, int dim, int edgesId, int nodeA, int nodeB, int distanceType) {
+    private static double distanceAnyNodes(MemorySegment seg, int dim, PersistentEdgeIndex edgesId, int nodeA, int nodeB, int distanceType) {
         InFlightKey keyA = new InFlightKey(edgesId, nodeA);
         InFlightKey keyB = new InFlightKey(edgesId, nodeB);
         float[] vecA = IN_FLIGHT_INSERTS.get(keyA);
