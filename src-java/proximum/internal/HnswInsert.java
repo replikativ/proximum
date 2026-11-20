@@ -752,6 +752,32 @@ public final class HnswInsert {
             }
         }
 
+        // Always keep the nearest node the SEARCH found. An in-flight peer may
+        // be nearer and make the diversity check drop every graph node; the
+        // peers then link only to each other. With the first inserts of a
+        // batch that left the first node (the entry point, which has no edges
+        // of its own yet) out of every list, and once another node was
+        // promoted to entry point nothing led to it any more.
+        for (int i = 0; i < candidates.count; i++) {
+            int graphId = candidates.ids[i];
+            if (graphId == nodeId) continue;
+            boolean kept = false;
+            for (int j = 0; j < selectedCount; j++) {
+                if (selected[j] == graphId) {
+                    kept = true;
+                    break;
+                }
+            }
+            if (!kept) {
+                if (selectedCount < selected.length) {
+                    selected[selectedCount++] = graphId;
+                } else if (selectedCount > 0) {
+                    selected[selectedCount - 1] = graphId;
+                }
+            }
+            break;
+        }
+
         if (selectedCount < selected.length) {
             return Arrays.copyOf(selected, selectedCount);
         }
