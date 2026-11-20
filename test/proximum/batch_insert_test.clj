@@ -8,7 +8,16 @@
    - a node wrote its own neighbor list over the back-links that concurrent
      inserts had already put there;
    - a node was linked on its upper layers first, so another insert could
-     descend onto it and search the layer below from a node without edges."
+     descend onto it and search the layer below from a node without edges.
+
+   And two that left a vector with no edges at all, or with the same neighbor
+   twice:
+
+   - the first insert published the entry point and the height as two writes;
+     an insert that saw the entry point but not yet the height linked itself
+     on no layer;
+   - a candidate that was both in flight and already in the graph was selected
+     twice when its vector equalled the new one."
   (:require [clojure.test :refer [deftest is]]
             [proximum.core :as core]
             [proximum.hnsw.internal :as hi])
@@ -55,3 +64,34 @@
         (is (contains? neighbors 0) "its own choice")
         (is (contains? neighbors 3) "and the link that was already there"))
       (finally (core/close! base)))))
+
+(defn- layer-0-lists [vectors]
+  (let [n (count vectors)
+        idx (core/insert-batch
+             (core/create-index {:type :hnsw :dim (alength ^floats (first vectors))
+                                 :distance :euclidean :M 8 :ef-construction 40
+                                 :capacity (* 2 n)
+                                 :store-config {:backend :memory :id (random-uuid)}})
+             vectors
+             (range n))
+        ^PersistentEdgeIndex pes (hi/edges idx)]
+    (try
+      (mapv #(vec (.getNeighbors pes 0 (int %))) (range n))
+      (finally (core/close! idx)))))
+
+(deftest every-vector-of-a-batch-into-an-empty-index-is-linked
+  ;; 202 vectors split into two tasks that start together on an empty graph.
+  ;; About one such build in 150 used to leave a vector without any edge.
+  (let [edgeless (reduce + (repeatedly 600
+                                       #(count (filter empty?
+                                                       (layer-0-lists (vec (repeatedly 202 (fn [] (random-vector 16)))))))))]
+    (is (zero? edgeless) (str edgeless " vectors were left without edges"))))
+
+(deftest no-neighbor-is-listed-twice
+  ;; Identical vectors: the diversity check compares 0 < 0 and lets the second
+  ;; copy of a candidate through.
+  (let [v (random-vector 16)
+        twice (reduce + (repeatedly 30
+                                    #(count (remove (fn [l] (= (count l) (count (distinct l))))
+                                                    (layer-0-lists (vec (repeatedly 300 (fn [] (aclone ^floats v)))))))))]
+    (is (zero? twice) (str twice " neighbor lists hold the same id twice"))))

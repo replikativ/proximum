@@ -176,8 +176,7 @@ public final class HnswInsert {
             nodeId, nodeLevel, edges.getEntrypoint(), edges.getCurrentMaxLevel());
 
         // Try to become entry point if graph is empty
-        if (edges.compareAndSetEntrypoint(-1, nodeId)) {
-            edges.setCurrentMaxLevel(nodeLevel);
+        if (edges.tryInitEntry(nodeId, nodeLevel)) {
             logger.debug("Insert nodeId={} became entry point (graph was empty)", nodeId);
             return;
         }
@@ -191,8 +190,9 @@ public final class HnswInsert {
 
         try {
             // Read current state
-            int ep = edges.getEntrypoint();
-            int currentMaxLevel = edges.getCurrentMaxLevel();
+            long entry = edges.entrySnapshot();
+            int ep = (int) entry;
+            int currentMaxLevel = (int) (entry >> 32);
 
             // Greedy descent from entry point to insertion level
             for (int level = currentMaxLevel; level > nodeLevel; level--) {
@@ -217,8 +217,10 @@ public final class HnswInsert {
                 // Search for candidates at this level
                 SearchResult result = searchLayer(seg, edges, vector, dim, ep, level, efConstruction, distanceType);
 
-                logger.debug("Insert nodeId={} level={} searchResult.count={} candidates={}",
-                    nodeId, level, result.count, Arrays.toString(Arrays.copyOf(result.ids, result.count)));
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Insert nodeId={} level={} searchResult.count={} candidates={}",
+                        nodeId, level, result.count, Arrays.toString(Arrays.copyOf(result.ids, result.count)));
+                }
 
                 // Apply diversity heuristic for neighbor selection.
                 // In-flight inserts are candidates on layer 0 only: there a node
@@ -230,7 +232,9 @@ public final class HnswInsert {
                                 maxNeighbors, distanceType)
                         : selectNeighborsHeuristic(seg, dim, nodeId, result, maxNeighbors, distanceType);
 
-                logger.debug("Insert nodeId={} level={} selected={}", nodeId, level, Arrays.toString(chosen[level]));
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Insert nodeId={} level={} selected={}", nodeId, level, Arrays.toString(chosen[level]));
+                }
 
                 // Entry point for the next layer: the nearest node found in the graph
                 for (int i = 0; i < result.count; i++) {
@@ -260,16 +264,8 @@ public final class HnswInsert {
             }
 
             // Update entry point and max level if this node is higher
-            if (nodeLevel > currentMaxLevel) {
-                while (true) {
-                    int current = edges.getCurrentMaxLevel();
-                    if (nodeLevel <= current) break;
-                    if (edges.compareAndSetMaxLevel(current, nodeLevel)) {
-                        edges.setEntrypoint(nodeId);
-                        logger.debug("Insert nodeId={} became new entry point, maxLevel={}", nodeId, nodeLevel);
-                        break;
-                    }
-                }
+            if (nodeLevel > currentMaxLevel && edges.tryPromoteEntry(nodeId, nodeLevel)) {
+                logger.debug("Insert nodeId={} became new entry point, maxLevel={}", nodeId, nodeLevel);
             }
 
             if (logger.isDebugEnabled()) {
@@ -722,6 +718,17 @@ public final class HnswInsert {
             if (candidateId == nodeId) {
                 continue;
             }
+
+            // An in-flight insert may already be in the graph on this layer and
+            // then came in twice: from the search and from the registry.
+            boolean seen = false;
+            for (int j = 0; j < selectedCount; j++) {
+                if (selected[j] == candidateId) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (seen) continue;
 
             double candidateDist = mergedDists[i];
 
