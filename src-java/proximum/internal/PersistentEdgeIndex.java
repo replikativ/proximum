@@ -647,6 +647,49 @@ public final class PersistentEdgeIndex {
         }
     }
 
+    // ---- Entry point and height, published together -------------------------
+    //
+    // They are two fields, and concurrent inserts must never see one without
+    // the other: an insert that saw the first node as entry point while the
+    // height was still -1 linked itself on no layer at all.
+
+    /** Make {@code nodeId} the entry point of an empty graph. False if it is not empty. */
+    public synchronized boolean tryInitEntry(int nodeId, int level) {
+        if (entrypoint.get() != -1) return false;
+        currentMaxLevel.set(level);
+        entrypoint.set(nodeId);
+        return true;
+    }
+
+    /** Make {@code nodeId} the entry point if {@code level} is above the current height. */
+    public synchronized boolean tryPromoteEntry(int nodeId, int level) {
+        if (level <= currentMaxLevel.get()) return false;
+        entrypoint.set(nodeId);
+        currentMaxLevel.set(level);
+        return true;
+    }
+
+    /** A consistent (height, entry point) pair: height in the high 32 bits. */
+    public synchronized long entrySnapshot() {
+        return ((long) currentMaxLevel.get() << 32) | (entrypoint.get() & 0xFFFFFFFFL);
+    }
+
+    /**
+     * Hold a node's lock across a read-modify-write of its neighbor list.
+     * {@link #setNeighbors} locks only the write itself, so two writers that
+     * each read the list, add one neighbor and write it back would lose one of
+     * the two. Reentrant: setNeighbors may be called while holding it. Always
+     * pair with {@link #unlockNode} in a finally block, and hold one node's
+     * lock at a time.
+     */
+    public void lockNode(int nodeId) {
+        stripedLocks[nodeId & LOCK_MASK].lock();
+    }
+
+    public void unlockNode(int nodeId) {
+        stripedLocks[nodeId & LOCK_MASK].unlock();
+    }
+
     private int[] getNeighborsLayer0(int nodeId) {
         int chunkIdx = nodeId >> CHUNK_SHIFT;
         int nodeOffset = nodeId & CHUNK_MASK;
@@ -880,6 +923,12 @@ public final class PersistentEdgeIndex {
                             // Truly doesn't exist - allocate new
                             chunk = new int[CHUNK_SIZE * slotsPerNode];
                         }
+                        // Claim it before releasing the lock. Until it is
+                        // owned, a writer of another node in this chunk takes
+                        // it for an inherited chunk, clones it and installs
+                        // the clone - and this thread's write below would go
+                        // into the detached original.
+                        ownedChunks.add(chunkAddr);
                         chunks[chunkIdx] = chunk;
                     }
                 }
@@ -930,11 +979,15 @@ public final class PersistentEdgeIndex {
             return;
         }
 
-        // Transient mode - write after allocation
+        // Transient mode - write after allocation.
+        // Ids first, count last: a reader on another thread takes no lock. With
+        // the count first it could read the new length over slots not written
+        // yet and follow an edge nobody supplied (a zero from a fresh slot is
+        // node 0). In this order every id it can see was given to this node.
         int base = nodeOffset * slotsPerNode;
         int count = Math.min(neighbors.length, M0);
-        chunk[base] = count;
         System.arraycopy(neighbors, 0, chunk, base + 1, count);
+        chunk[base] = count;
 
         // Mark chunk as dirty
         markDirty(0, chunkIdx);
@@ -960,13 +1013,21 @@ public final class PersistentEdgeIndex {
             if (oldLayerChunks == null || oldChunk == null) {
                 // Hard ref is null - check soft ref / storage before allocating new
                 // This prevents data loss if chunk was softified
+                // The layer's chunk directory is shared by all its chunks, so
+                // it is created under one lock for the layer. The per-chunk
+                // lock below is chosen by chunk: two writers creating the same
+                // layer for different chunks each installed a directory, and
+                // the second replaced the first one's chunk with it.
+                if (upper[layerIdx] == null) {
+                    synchronized (upper) {
+                        if (upper[layerIdx] == null) {
+                            upper[layerIdx] = new int[numChunks][];
+                        }
+                    }
+                }
                 synchronized (allocLocks[(layerIdx * 31 + chunkIdx) & ALLOC_LOCK_MASK]) {
                     // Re-read under lock
                     layerChunks = upper[layerIdx];
-                    if (layerChunks == null) {
-                        layerChunks = new int[numChunks][];
-                        upper[layerIdx] = layerChunks;
-                    }
                     chunk = layerChunks[chunkIdx];
                     if (chunk == null) {
                         // Try to resolve from soft ref or storage
@@ -978,6 +1039,8 @@ public final class PersistentEdgeIndex {
                             // Truly doesn't exist - allocate new
                             chunk = new int[CHUNK_SIZE * slotsPerNodeUpper];
                         }
+                        // Claimed before the lock is released, as on layer 0.
+                        ownedChunks.add(chunkAddr);
                         layerChunks[chunkIdx] = chunk;
                     }
                 }
@@ -1034,11 +1097,11 @@ public final class PersistentEdgeIndex {
             return;
         }
 
-        // Transient mode - write after allocation
+        // Transient mode - write after allocation (ids first, as on layer 0)
         int base = nodeOffset * slotsPerNodeUpper;
         int count = Math.min(neighbors.length, M);
-        chunk[base] = count;
         System.arraycopy(neighbors, 0, chunk, base + 1, count);
+        chunk[base] = count;
 
         // Mark chunk as dirty
         markDirty(layer, chunkIdx);
