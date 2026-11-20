@@ -74,17 +74,10 @@ public final class HnswInsert {
     public static final int DISTANCE_COSINE = Distance.COSINE;
     public static final int DISTANCE_INNER_PRODUCT = Distance.INNER_PRODUCT;
 
-    // Concurrent candidate tracking: in-flight inserts that can be considered as neighbors
-    // Maps (edges instance, nodeId) -> vector for nodes currently being inserted
-    // This allows parallel inserts to see each other as potential neighbors
-    // IMPORTANT: Scoped per PersistentEdgeIndex to prevent cross-index contamination during compaction
-    private static final ConcurrentHashMap<InFlightKey, float[]> IN_FLIGHT_INSERTS = new ConcurrentHashMap<>();
-
-    // Composite key for in-flight inserts: (edges instance identity, nodeId)
-    // Keyed by the edge index itself, compared by identity. It used to be its
-    // identity HASH, which two live indexes can share: one could then select the
-    // other's in-flight node ids as neighbors.
-    private record InFlightKey(PersistentEdgeIndex edgesId, int nodeId) {}
+    // Concurrent candidate tracking: inserts in flight can be considered as
+    // neighbors by their peers. The registry lives on the edge index
+    // (PersistentEdgeIndex.inFlightInserts), so two indexes with overlapping
+    // node ids - a compaction's source and target - never see each other's.
 
     // =========================================================================
     // Vector Normalization (delegates to Distance)
@@ -186,10 +179,10 @@ public final class HnswInsert {
 
         // Use edges identity hash as part of key to scope per-index
         PersistentEdgeIndex edgesId = edges;
-        InFlightKey inFlightKey = new InFlightKey(edgesId, nodeId);
+        Integer inFlightKey = nodeId;
 
         // Register this insert as in-flight so concurrent inserts can see us
-        IN_FLIGHT_INSERTS.put(inFlightKey, vector);
+        edgesId.inFlightInserts.put(inFlightKey, vector);
 
         try {
             // Read current state
@@ -278,7 +271,7 @@ public final class HnswInsert {
             }
         } finally {
             // Always unregister when done
-            IN_FLIGHT_INSERTS.remove(inFlightKey);
+            edgesId.inFlightInserts.remove(inFlightKey);
         }
     }
 
@@ -668,7 +661,7 @@ public final class HnswInsert {
 
         // Compute distances to in-flight inserts (excluding ourselves, same index only)
         // Fast path: no other in-flight inserts, just use candidates directly
-        if (IN_FLIGHT_INSERTS.size() <= 1) {
+        if (edgesId.inFlightInserts.size() <= 1) {
             // Only ourselves or empty - skip merging entirely
             // Still pass nodeId to prevent self-loops during concurrent batch insert
             return selectNeighborsHeuristic(seg, dim, nodeId, candidates, maxNeighbors, distanceType);
@@ -679,17 +672,14 @@ public final class HnswInsert {
         double[] inFlightDists = IN_FLIGHT_DISTS.get();
         int inFlightCount = 0;
 
-        for (var entry : IN_FLIGHT_INSERTS.entrySet()) {
+        for (var entry : edgesId.inFlightInserts.entrySet()) {
             if (inFlightCount >= 128) break;  // Safety limit
-            InFlightKey key = entry.getKey();
-            // CRITICAL: Only consider in-flight inserts from the SAME index
-            // During compaction, SOURCE and NEW indices have overlapping nodeIds
-            if (key.edgesId() != edgesId) continue;
-            if (key.nodeId() == nodeId) continue;  // Skip ourselves
+            int otherId = entry.getKey();
+            if (otherId == nodeId) continue;  // Skip ourselves
             float[] otherVector = entry.getValue();
 
             double dist = Distance.computeVectors(vector, otherVector, distanceType);
-            inFlightIds[inFlightCount] = key.nodeId();
+            inFlightIds[inFlightCount] = otherId;
             inFlightDists[inFlightCount] = dist;
             inFlightCount++;
         }
@@ -954,15 +944,14 @@ public final class HnswInsert {
 
     /**
      * Distance between any two nodes - handles in-flight vectors (not yet in segment).
-     * If a node is in IN_FLIGHT_INSERTS, uses its vector; otherwise reads from segment.
+     * If a node is in flight, uses its vector; otherwise reads from segment.
      *
      * @param edgesId The edge index - scopes in-flight lookups to it
      */
     private static double distanceAnyNodes(MemorySegment seg, int dim, PersistentEdgeIndex edgesId, int nodeA, int nodeB, int distanceType) {
-        InFlightKey keyA = new InFlightKey(edgesId, nodeA);
-        InFlightKey keyB = new InFlightKey(edgesId, nodeB);
-        float[] vecA = IN_FLIGHT_INSERTS.get(keyA);
-        float[] vecB = IN_FLIGHT_INSERTS.get(keyB);
+        ConcurrentHashMap<Integer, float[]> inFlight = edgesId.inFlightInserts;
+        float[] vecA = inFlight.get(nodeA);
+        float[] vecB = inFlight.get(nodeB);
 
         if (vecA != null && vecB != null) {
             // Both in-flight

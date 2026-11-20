@@ -85,6 +85,12 @@ public final class PersistentEdgeIndex {
     private static final int LOCK_MASK = LOCK_STRIPES - 1;
     private final ReentrantLock[] stripedLocks;
 
+    // Vectors of the nodes a parallel batch is inserting right now, by node id.
+    // Their peers read it to consider them as neighbors before they are linked.
+    // Per instance: a fork starts with none.
+    final java.util.concurrent.ConcurrentHashMap<Integer, float[]> inFlightInserts =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
     // Allocation locks for chunk creation (prevents races in transient mode)
     // Uses smaller stripe count since allocation is rare
     private static final int ALLOC_LOCK_STRIPES = 64;
