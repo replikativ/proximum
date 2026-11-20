@@ -751,6 +751,19 @@ Returns: {:vector-count :deleted-count :live-count :deletion-ratio
      :referentially-transparent? true
      :supports-remote? true}
 
+    reachability
+    {:args [:=> [:cat VectorIndex [:? :map]] :map]
+     :ret  :map
+     :doc  "Walk the graph and report which live vectors a search can reach.
+Returns: {:live-count :reachable-count :unreachable-count :unreachable
+          :fully-reachable? :stale-edge-count}
+Unreachable vectors and stale edges come from deletes; compact removes both.
+Reads the whole graph: for a health check, not a request path.
+Options: {:max-ids 100} - how many unreachable external ids to list."
+     :impl proximum.metrics/reachability
+     :referentially-transparent? true
+     :supports-remote? true}
+
     ;; =========================================================================
     ;; Crypto/Auditability
     ;; =========================================================================

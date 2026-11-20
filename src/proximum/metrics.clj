@@ -116,3 +116,71 @@
                                 0.0)
                               M)
                            0.0)}))
+
+(defn reachability
+  "Walk the graph and report which live vectors a search can reach.
+
+   A search starts at the entry point and follows edges, so a live vector no path
+   leads to is never returned, though it is stored and counted. This walks layer 0
+   from the entry point the way a search does - a deleted node has no edges and
+   is not a stepping stone - and compares what it reaches with what is live.
+
+   Returns:
+     :live-count        - vectors that are stored and not deleted
+     :reachable-count   - of those, how many a search can reach
+     :unreachable-count - the rest; 0 for a healthy index
+     :unreachable       - their external ids, at most `:max-ids` of them
+     :fully-reachable?  - true when nothing is unreachable
+     :stale-edge-count  - edges on any layer that still point at a deleted
+                          vector; each one takes a neighbor slot a live vector
+                          could use, so recall falls as they accumulate
+
+   Unreachable vectors and stale edges both come from deletes. `compact`
+   rebuilds the graph from the live vectors and removes both; nothing else
+   reconnects an unreachable vector.
+
+   Cost: linear in the number of edges; it reads the whole graph. Meant for a
+   health check or an operator, not for a request path.
+
+   Options:
+     :max-ids - how many unreachable external ids to list (default 100)"
+  ([idx] (reachability idx {}))
+  ([idx {:keys [max-ids] :or {max-ids 100}}]
+   (let [^PersistentEdgeIndex pes (p/edge-storage idx)
+         n (int (p/vector-count-total idx))
+         entry (int (.getEntrypoint pes))
+         max-level (int (.getCurrentMaxLevel pes))
+         seen (java.util.BitSet. (max 1 n))
+         queue (java.util.ArrayDeque.)
+         live? (fn [id] (and (< -1 (int id) n) (not (.isDeleted pes (int id)))))]
+     (when (live? entry)
+       (.set seen entry)
+       (.add queue entry))
+     (loop []
+       (when-some [current (.poll queue)]
+         (when-some [neighbors (.getNeighbors pes 0 (int current))]
+           (doseq [nb neighbors]
+             (when (and (live? nb) (not (.get seen (int nb))))
+               (.set seen (int nb))
+               (.add queue nb))))
+         (recur)))
+     (let [live (into [] (filter live?) (range n))
+           unreachable (into [] (remove #(.get seen (int %))) live)
+           stale (reduce
+                  (fn [acc id]
+                    (loop [level 0 acc acc]
+                      (if (> level max-level)
+                        acc
+                        (recur (inc level)
+                               (if-some [neighbors (.getNeighbors pes (int level) (int id))]
+                                 (+ acc (count (filter #(.isDeleted pes (int %)) neighbors)))
+                                 acc)))))
+                  0 live)]
+       {:live-count (count live)
+        :reachable-count (- (count live) (count unreachable))
+        :unreachable-count (count unreachable)
+        :unreachable (into [] (comp (take max-ids)
+                                    (map #(:external-id (p/get-metadata idx %))))
+                           unreachable)
+        :fully-reachable? (empty? unreachable)
+        :stale-edge-count stale}))))

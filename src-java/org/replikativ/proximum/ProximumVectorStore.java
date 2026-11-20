@@ -70,6 +70,7 @@ public class ProximumVectorStore implements AutoCloseable {
     private static IFn insertFn;
     private static IFn commitGraphFn;
     private static IFn capacityFn;
+    private static IFn reachabilityFn;
     private static IFn needsCompactionFn;
     private static IFn resetFn;
     private static IFn compactFn;
@@ -138,6 +139,7 @@ public class ProximumVectorStore implements AutoCloseable {
             insertFn = Clojure.var("proximum.core", "insert");
             commitGraphFn = Clojure.var("proximum.core", "commit-graph");
             capacityFn = Clojure.var("proximum.core", "capacity");
+            reachabilityFn = Clojure.var("proximum.core", "reachability");
             needsCompactionFn = Clojure.var("proximum.core", "needs-compaction?");
             resetFn = Clojure.var("proximum.core", "reset!");
             compactFn = Clojure.var("proximum.core", "compact");
@@ -653,6 +655,10 @@ public class ProximumVectorStore implements AutoCloseable {
      *   - (fn [id metadata] boolean) - predicate receives external ID
      *   - Iterable collection of allowed external IDs
      *
+     * An empty filter returns []. A nil filter throws (:nil-filter): an empty lazy
+     * seq is nil, so pass the collection rather than (seq coll), and use search for
+     * no filter.
+     *
      * Example:
      *   (search-filtered idx query 10 #{"doc-1" "doc-2"})
      */
@@ -706,6 +712,21 @@ public class ProximumVectorStore implements AutoCloseable {
     public int capacity() {
         ensureInitialized();
         return ((Number) capacityFn.invoke(clojureIndex)).intValue();
+    }
+
+    /**
+     * Walk the graph and report which live vectors a search can reach.
+     * Returns: {:live-count :reachable-count :unreachable-count :unreachable
+     *           :fully-reachable? :stale-edge-count}
+     * Unreachable vectors and stale edges come from deletes; compact removes both.
+     * Reads the whole graph: for a health check, not a request path.
+     * Options: {:max-ids 100} - how many unreachable external ids to list.
+     */
+    public Map<String, Object> reachability() {
+        ensureInitialized();
+        @SuppressWarnings("unchecked")
+        Map<Object, Object> result = (Map<Object, Object>) reachabilityFn.invoke(clojureIndex);
+        return result == null ? null : convertClojureMap(result);
     }
 
     /**
@@ -1011,6 +1032,10 @@ public class ProximumVectorStore implements AutoCloseable {
      *   - (fn [id metadata] boolean) - predicate receives external ID
      *   - Iterable collection of allowed external IDs
      *
+     * An empty filter returns []. A nil filter throws (:nil-filter): an empty lazy
+     * seq is nil, so pass the collection rather than (seq coll), and use search for
+     * no filter.
+     *
      * Example:
      *   (search-filtered idx query 10 #{"doc-1" "doc-2"})
      */
@@ -1036,6 +1061,21 @@ public class ProximumVectorStore implements AutoCloseable {
         Object newIdx = insertFn.invoke(clojureIndex, vector, id, toClojureMap(metadata));
         this.clojureIndex = newIdx;
         return this;
+    }
+
+    /**
+     * Walk the graph and report which live vectors a search can reach.
+     * Returns: {:live-count :reachable-count :unreachable-count :unreachable
+     *           :fully-reachable? :stale-edge-count}
+     * Unreachable vectors and stale edges come from deletes; compact removes both.
+     * Reads the whole graph: for a health check, not a request path.
+     * Options: {:max-ids 100} - how many unreachable external ids to list.
+     */
+    public Map<String, Object> reachability(Map<String, Object> opts) {
+        ensureInitialized();
+        @SuppressWarnings("unchecked")
+        Map<Object, Object> result = (Map<Object, Object>) reachabilityFn.invoke(clojureIndex, toClojureMap(opts));
+        return result == null ? null : convertClojureMap(result);
     }
 
     /**
