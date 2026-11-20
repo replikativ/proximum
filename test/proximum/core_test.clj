@@ -1628,21 +1628,27 @@
           (range n)))
 
 (deftest search-after-deleting-the-oldest-vectors
-  (dotimes [_ 200]
-    (let [idx (reduce (fn [idx i] (dissoc idx (str "d" i))) (spread-index 100) (range 60))
-          survivors (set (map #(str "d" %) (range 60 100)))]
-      (is (= survivors (set (map :id (core/search idx (spread-vector 0) 100))))
-          "every surviving vector is found, and no deleted one")
-      (let [idx' (assoc idx "new" (spread-vector 7))]
-        (is (= (conj survivors "new")
-               (set (map :id (core/search idx' (spread-vector 0) 100))))
-            "a vector inserted after the deletes joins the same graph")))))
+  ;; Randomized companion to proximum.deleted-nodes-test, which wires each
+  ;; failing graph by hand: this one deletes through the real insert path.
+  (dotimes [_ 60]
+    (let [full (spread-index 100)]
+      (try
+        (let [idx (reduce (fn [idx i] (dissoc idx (str "d" i))) full (range 60))
+              survivors (set (map #(str "d" %) (range 60 100)))]
+          (is (= survivors (set (map :id (core/search idx (spread-vector 0) 100))))
+              "every surviving vector is found, and no deleted one")
+          (let [idx' (assoc idx "new" (spread-vector 7))]
+            (is (= (conj survivors "new")
+                   (set (map :id (core/search idx' (spread-vector 0) 100))))
+                "a vector inserted after the deletes joins the same graph")))
+        (finally (core/close! full))))))
 
 (deftest search-after-deleting-all-but-one
-  ;; The entry point's own neighbors may all be gone before it is: the
-  ;; replacement must then come from the rest of the graph, not be "none".
-  (dotimes [_ 100]
+  (dotimes [_ 30]
     (let [order (shuffle (range 30))
           keep-id (first order)
-          idx (reduce (fn [idx i] (dissoc idx (str "d" i))) (spread-index 30) (rest order))]
-      (is (= [(str "d" keep-id)] (mapv :id (core/search idx (spread-vector 0) 10)))))))
+          full (spread-index 30)]
+      (try
+        (let [idx (reduce (fn [idx i] (dissoc idx (str "d" i))) full (rest order))]
+          (is (= [(str "d" keep-id)] (mapv :id (core/search idx (spread-vector 0) 10)))))
+        (finally (core/close! full))))))

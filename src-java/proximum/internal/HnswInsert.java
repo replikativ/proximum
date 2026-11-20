@@ -739,7 +739,10 @@ public final class HnswInsert {
             return;
         }
 
-        int[] current = edges.getNeighbors(layer, neighborId);
+        // Stale edges to deleted nodes are dropped here rather than kept: in a
+        // full list a close deleted node would win the pruning below and the
+        // new, live back-link would be the one rejected.
+        int[] current = withoutDeleted(edges, edges.getNeighbors(layer, neighborId));
         int currentCount = (current == null) ? 0 : current.length;
 
         // Check if already present
@@ -1065,11 +1068,29 @@ public final class HnswInsert {
             int M,
             int M0,
             int distanceType) {
+        delete(seg, edges, nodeId, dim, M, M0, distanceType, 0);
+    }
+
+    /**
+     * As above. {@code nodeCount} is the number of node ids ever assigned
+     * (ids are 0..nodeCount-1). It lets the replacement of a deleted entry
+     * point find a live node that has NO edges left, which the edge index alone
+     * cannot tell from an id that was never used. 0 when unknown.
+     */
+    public static void delete(
+            MemorySegment seg,
+            PersistentEdgeIndex edges,
+            int nodeId,
+            int dim,
+            int M,
+            int M0,
+            int distanceType,
+            int nodeCount) {
 
         // Switch to transient mode for mutation
         edges.asTransient();
         try {
-            deleteInternal(seg, edges, nodeId, dim, M, M0, distanceType);
+            deleteInternal(seg, edges, nodeId, dim, M, M0, distanceType, nodeCount);
         } finally {
             // Seal back to persistent mode
             edges.asPersistent();
@@ -1086,17 +1107,24 @@ public final class HnswInsert {
             int dim,
             int M,
             int M0,
-            int distanceType) {
+            int distanceType,
+            int nodeCount) {
 
         int currentMaxLevel = edges.getCurrentMaxLevel();
         int entrypoint = edges.getEntrypoint();
 
         // Handle entrypoint deletion - find replacement
         if (nodeId == entrypoint) {
-            int newEntry = findNewEntrypoint(edges, nodeId, currentMaxLevel);
+            int[] levelOut = new int[] {0};
+            int newEntry = findNewEntrypoint(edges, nodeId, currentMaxLevel, nodeCount, levelOut);
             if (newEntry >= 0) {
                 edges.setEntrypoint(newEntry);
-                // Note: max level may need recalculation but we keep it for now
+                // The hierarchy is now as tall as the replacement. Keeping the
+                // old height made a later insert between the two levels link
+                // to the entry point on layers it does not belong to.
+                // (The deleted node's lists are cleared up to the OLD height
+                // below.)
+                edges.setCurrentMaxLevel(levelOut[0]);
             } else {
                 // Graph is now empty
                 edges.setEntrypoint(-1);
@@ -1150,8 +1178,9 @@ public final class HnswInsert {
         int[] theirNeighbors = edges.getNeighbors(layer, neighborId);
         if (theirNeighbors == null) return;
 
-        // Remove deleted node from their list - these are preserved connections
-        int[] existing = removeFromArray(theirNeighbors, deletedId);
+        // Remove deleted node from their list - these are preserved connections.
+        // Older stale edges to other deleted nodes go with it.
+        int[] existing = withoutDeleted(edges, removeFromArray(theirNeighbors, deletedId));
 
         // If existing connections fill maxNeighbors, no room for new connections
         if (existing.length >= maxNeighbors) {
@@ -1167,7 +1196,8 @@ public final class HnswInsert {
         int newCandCount = 0;
 
         for (int id : deletedNeighbors) {
-            if (id != neighborId && id != deletedId && !contains(existing, id)) {
+            if (id != neighborId && id != deletedId && !edges.isDeleted(id)
+                    && !contains(existing, id)) {
                 newCandidates[newCandCount] = id;
                 newDistances[newCandCount] = Distance.computeNodes(seg, dim, neighborId, id, distanceType);
                 newCandCount++;
@@ -1227,27 +1257,27 @@ public final class HnswInsert {
      * Find new entrypoint when current is deleted.
      * Skips deleted nodes (those with no neighbors).
      */
-    private static int findNewEntrypoint(PersistentEdgeIndex edges, int deletedId, int maxLevel) {
-        // Start from highest level, find first non-deleted neighbor
+    private static int findNewEntrypoint(PersistentEdgeIndex edges, int deletedId, int maxLevel,
+                                         int nodeCount, int[] levelOut) {
+        int slots0 = edges.getSlotsPerNode();
+        int slotsUpper = edges.getSlotsPerNodeUpper();
+        // Highest layer first, so the replacement tops what is left of the
+        // hierarchy. On each layer: a live neighbor of the deleted node, else
+        // any live node with edges on that layer. The second step matters -
+        // the deleted node's own neighbors may all have been deleted before
+        // it, and declaring the graph empty then made every later search
+        // return nothing while live nodes remained. Rare path, linear in the
+        // allocated nodes.
         for (int level = maxLevel; level >= 0; level--) {
             int[] neighbors = edges.getNeighbors(level, deletedId);
             if (neighbors != null) {
                 for (int neighbor : neighbors) {
-                    // Check if neighbor is not deleted (has neighbors)
                     if (!edges.isDeleted(neighbor)) {
+                        levelOut[0] = level;
                         return neighbor;
                     }
                 }
             }
-        }
-        // None of its own neighbors is alive. That does not make the graph
-        // empty: they may all have been deleted before it. Declaring it empty
-        // here made every later search return nothing while live nodes
-        // remained. Take any live node that still has edges, highest layer
-        // first. Rare path, linear in the allocated nodes.
-        int slots0 = edges.getSlotsPerNode();
-        int slotsUpper = edges.getSlotsPerNodeUpper();
-        for (int level = maxLevel; level >= 0; level--) {
             int slots = (level == 0) ? slots0 : slotsUpper;
             for (int chunkIdx = 0; chunkIdx < edges.getNumChunks(); chunkIdx++) {
                 int[] chunk = (level == 0) ? edges.getLayer0Chunk(chunkIdx)
@@ -1257,13 +1287,41 @@ public final class HnswInsert {
                     if (chunk[j * slots] > 0) {
                         int id = (chunkIdx << PersistentEdgeIndex.CHUNK_SHIFT) | j;
                         if (id != deletedId && !edges.isDeleted(id)) {
+                            levelOut[0] = level;
                             return id;
                         }
                     }
                 }
             }
         }
+        // A live node may have no edges at all: its neighbors were deleted and
+        // nothing was left to reconnect it to. It is still a vector the index
+        // holds and must stay findable.
+        for (int id = 0; id < nodeCount; id++) {
+            if (id != deletedId && !edges.isDeleted(id)) {
+                levelOut[0] = 0;
+                return id;
+            }
+        }
         return -1;
+    }
+
+    /**
+     * The array without the ids of deleted nodes; the same array when it has none.
+     */
+    private static int[] withoutDeleted(PersistentEdgeIndex edges, int[] arr) {
+        if (arr == null) return null;
+        int count = 0;
+        for (int v : arr) {
+            if (!edges.isDeleted(v)) count++;
+        }
+        if (count == arr.length) return arr;
+        int[] result = new int[count];
+        int idx = 0;
+        for (int v : arr) {
+            if (!edges.isDeleted(v)) result[idx++] = v;
+        }
+        return result;
     }
 
     /**
